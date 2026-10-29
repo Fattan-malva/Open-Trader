@@ -10,7 +10,7 @@ import type { EquityTracker } from "../../monitor/equity.js";
 import type { RuntimeEvent, TickHub } from "../../runtime/hubs.js";
 import type { AccountView } from "../../runtime/snapshot.js";
 import type { AgentActivity, AgentRole } from "../../agents/journal.js";
-import { lineChart, type ChartPoint } from "../chart.js";
+import { lineChart, pixelPnlChart, type ChartPoint } from "../chart.js";
 import {
   clockTime,
   formatTime,
@@ -133,6 +133,7 @@ export function panel(
   lines: string[],
   width: number,
   tone: PanelTone = "gray",
+  flush = false,
 ): string {
   const total = Math.max(16, width);
   const border = (text: string): string => paintTone(tone, text);
@@ -144,7 +145,11 @@ export function panel(
 
   return [
     `${border("╭")}${border(label)}${border("─".repeat(fill))}${border("╮")}`,
-    ...content.map((line) => `${border("│")} ${fitLine(line, inner)} ${border("│")}`),
+    ...content.map((line) =>
+      flush
+        ? `${border("│")}${fitLine(line, total - 2)}${border("│")}`
+        : `${border("│")} ${fitLine(line, inner)} ${border("│")}`,
+    ),
     `${border("╰")}${border("─".repeat(total - 2))}${border("╯")}`,
   ].join("\n");
 }
@@ -1195,22 +1200,38 @@ export function renderDashboard(state: DashboardState, layout: DashboardLayout):
   let used = kpi.split("\n").length;
   const accountH = 6;
   const canAccount = mainHeight >= used + accountH + bottomPanelH + 3;
-  const reserved = used + (canAccount ? accountH : 0);
-  const chartHeight = Math.max(3, Math.min(8, mainHeight - reserved - bottomPanelH - 2));
+  const chartHeight = Math.max(
+    4,
+    Math.min(
+      6,
+      mainHeight - used - (canAccount ? accountH : 0) - bottomPanelH - 8,
+    ),
+  );
 
   let chartStart = "";
-  if (state.showCharts && chartHeight >= 3) {
+  if (state.showCharts && chartHeight >= 4) {
     const pnlPoints: ChartPoint[] = equity
       .points()
-      .filter((point) => Number.isFinite(point.value));
-    const chartLines = lineChart(pnlPoints, {
-      width: leftWidth - 4,
+      .filter((point) => Number.isFinite(point.t) && Number.isFinite(point.value));
+    const chartLines = pixelPnlChart(pnlPoints, {
+      width: leftWidth - 2,
       height: chartHeight,
       currency: view.currency,
-      tone: "accent",
-      baseline: 0,
+      title: "PNL TODAY",
     }).split("\n");
-    chartStart = panel("P&L · today", chartLines, leftWidth, "blue");
+    chartStart = panel("P&L · today", chartLines, leftWidth, "blue", true);
+    leftBaseBlocks.push(chartStart);
+  } else if (state.showCharts) {
+    const pnlPoints: ChartPoint[] = equity
+      .points()
+      .filter((point) => Number.isFinite(point.t) && Number.isFinite(point.value));
+    const chartLines = pixelPnlChart(pnlPoints, {
+      width: leftWidth - 2,
+      height: 4,
+      currency: view.currency,
+      title: "PNL TODAY",
+    }).split("\n");
+    chartStart = panel("P&L · today", chartLines, leftWidth, "blue", true);
     leftBaseBlocks.push(chartStart);
   }
   if (canAccount) leftBaseBlocks.push(accountBlock);
