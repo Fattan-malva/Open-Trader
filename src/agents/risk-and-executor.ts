@@ -281,7 +281,13 @@ export class RiskExecutor {
         ? (side === "buy" ? Math.max(initialStop, savedStop) : Math.min(initialStop, savedStop))
         : initialStop;
       const savedRiskUsd = Number(position.riskUsd);
-      const wasAlreadyProtected = virtualStopLocksProfit(side, trailStop, entry);
+      const wasAlreadyProtected = canMoveTrailStop(
+        side,
+        trailStop,
+        entry,
+        false,
+        this.deps.config.profitLockMinPips * pip,
+      );
 
       this.managed.set(position.positionId, {
         positionId: position.positionId,
@@ -718,7 +724,13 @@ export class RiskExecutor {
         trailDistance,
         best: entry.price,
         atr: approxAtr,
-        trailActivated: virtualStopLocksProfit(side, trailStop, entry.price),
+        trailActivated: canMoveTrailStop(
+          side,
+          trailStop,
+          entry.price,
+          false,
+          this.deps.config.profitLockMinPips * pip,
+        ),
         riskUsd: Number(entry.riskUsd) > 0 ? Number(entry.riskUsd) : undefined,
         lastBrokerStopMoveAt: 0,
         openedAt: Date.parse(position.create_time) || entry.at,
@@ -849,43 +861,20 @@ export class RiskExecutor {
         await this.refreshTrailDistance(managed);
       }
 
-      // Never trigger TS or update it using a cached quote that is no longer
-      // current. The broker-side emergency SL remains active while feed data
-      // is stale; a fresh executable quote is required for a TS close decision.
-      if (!isFreshQuote(quote.timestamp, now, this.deps.config.maxQuoteAgeMs)) {
+      // ATR refresh can await REST. Read the quote again afterward so TS
+      // decisions use the newest executable price, not the pre-await cache.
+      const currentQuote = this.deps.ticks.get(managed.symbol);
+      const quoteNow = Date.now();
+      if (
+        !currentQuote ||
+        !isFreshQuote(currentQuote.timestamp, quoteNow, this.deps.config.maxQuoteAgeMs)
+      ) {
         continue;
       }
 
-      // The first published TS VIRT move is held until it already locks profit.
-      // Thereafter it may only ratchet farther into profit.
-      const previousBest = managed.best;
-      managed.best = updateBest(managed.side, managed.best, quote.bid, quote.ask);
-      if (managed.best !== previousBest) {
-        this.advanceStop(managed, "best update");
-      }
-
-      // Profit protection becomes active when TS VIRT itself crosses entry.
-      // Once activated, that state stays true and the stop never backs off.
-      const activatedNow = !managed.trailActivated &&
-        virtualStopLocksProfit(managed.side, managed.trailStop, managed.entry);
-      if (activatedNow) {
-        managed.trailActivated = true;
-        this.log({
-          at: now,
-          action: "protect",
-          symbol: managed.symbol,
-          positionId: managed.positionId,
-          side: managed.side,
-          price: managed.trailStop,
-          reason: `TS VIRT crossed entry ${managed.entry.toFixed(managed.digits)} · profit lock armed`,
-          ok: true,
-        });
-      }
-
-      if (!managed.closing && virtualStopHit(managed.side, managed.trailStop, quote.bid, quote.ask)) {
-        await this.closeFull(managed, this.triggerReason(managed, quote));
-      } else if (managed.trailActivated) {
-        await this.tightenEmergencyStop(managed, quote);
+      this.processTrailingQuote(managed, currentQuote, quoteNow);
+      if (!managed.closing && managed.trailActivated) {
+        await this.tightenEmergencyStop(managed, currentQuote);
       }
     }
   }
