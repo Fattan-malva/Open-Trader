@@ -37,3 +37,58 @@ test("ENTRY panel keeps full reject reasons and wraps them to continuation rows"
   assert.match(rendered, /↳ /, "wrapped continuation rows must have a marker");
   assert.doesNotMatch(rendered, /…/, "entry diagnostic text should not be ellipsis-truncated");
 });
+
+
+function renderedPanelHeights(rendered: string): number[] {
+  const lines = rendered.replace(/\\u001b\\[[0-9;]*m/g, "").split("\\n");
+  const starts = lines
+    .map((line, index) => line.startsWith("╭") ? index : -1)
+    .filter((index) => index >= 0);
+  return starts.map((start, index) => (starts[index + 1] ?? lines.length) - start);
+}
+
+test("all agent containers keep the tallest ENTRY height when later logs are shorter", () => {
+  const now = Date.now();
+  const base = {
+    running: true,
+    mode: "live",
+    updatedAt: now,
+    startedAt: now,
+    universe: 85,
+    nextScanAt: now + 2_000,
+    timeframes: { screener: "M1", trend: "M5", confirm: "M1", trail: "M1" },
+    screener: { at: now, durationMs: 100, pass: 0, candidates: [] },
+    lastSignal: null,
+    trailing: [],
+    openPositions: [],
+    stats: { trades: 0, wins: 0, losses: 0, flats: 0, netProfit: 0, consecutiveLosses: 0, winRate: 0 },
+    dailyPnl: 0,
+    tradeLog: [],
+    executor: { managed: [], stats: {}, trailing: [], tradeLog: [] },
+  };
+  const longEntryState = {
+    ...base,
+    activity: [{
+      at: now,
+      agent: "entry",
+      message: "open ditolak XAUUSD: " +
+        "price changed while checking minimum lot and aggregate risk budget ".repeat(10),
+      tone: "warn",
+    }],
+  } as unknown as AgentStateFile;
+  const tallHeights = renderedPanelHeights(renderAgentContainers(longEntryState, 90));
+  assert.equal(tallHeights.length, 3);
+  assert.ok(tallHeights[0]! > 6, "long ENTRY diagnostics should grow the cards");
+  assert.deepEqual(tallHeights, [tallHeights[0], tallHeights[0], tallHeights[0]]);
+
+  const shortLogState = {
+    ...base,
+    activity: [],
+  } as unknown as AgentStateFile;
+  const shortHeights = renderedPanelHeights(renderAgentContainers(shortLogState, 90));
+  assert.deepEqual(
+    shortHeights,
+    [tallHeights[0], tallHeights[0], tallHeights[0]],
+    "all cards should retain the high-water height after the log volume drops",
+  );
+});
