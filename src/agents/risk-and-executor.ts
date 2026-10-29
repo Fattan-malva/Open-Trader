@@ -45,11 +45,7 @@ const TS_CLOSE_BUSY_RETRY_MS = 10;
 const TS_CLOSE_RETRY_BASE_MS = 250;
 const TS_CLOSE_RETRY_MAX_MS = 5_000;
 
-/** Faster retries for a moving quote, with bounded backoff for persistent errors. */
-/**
- * Check whether a new entry on `symbol` would exceed per-symbol limits.
- * Returns a rejection reason string, or undefined if allowed.
- */
+/** Check whether a new entry on `symbol` would exceed per-symbol limits. */
 export function symbolEntryAllowed(
   symbol: string,
   openCountOnSymbol: number,
@@ -565,7 +561,7 @@ export class RiskExecutor {
     // exposure far beyond the per-trade risk target. Cap open count per symbol
     // and respect a cooldown after a close before re-entering the same name.
     const sameSymbolOpen = [...this.managed.values()].filter(
-      (m) => m.symbol === signal.symbol && !m.closing && !m.closeRequested,
+      (m) => m.symbol === signal.symbol,
     ).length;
     const stackingReason = symbolEntryAllowed(
       signal.symbol,
