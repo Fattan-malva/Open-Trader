@@ -429,7 +429,7 @@ export class AgentEngine {
           confirmCandles: confirmation.candles,
         });
         if (!decision.signal) {
-          tried.push(`${candidate.symbol}: ${decision.rejects.slice(0, 2).join("; ") || "no signal"}`);
+          tried.push(`${candidate.symbol}: ${decision.rejects.join("; ") || "no signal"}`);
           continue;
         }
 
