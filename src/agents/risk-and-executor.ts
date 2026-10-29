@@ -177,12 +177,31 @@ export function computeLots(input: SizingInput): SizingResult {
   let lots = roundVolumeDown(Math.min(rawLots, input.maxLots), input.volumeStep);
   if (lots > input.volumeMax) lots = roundVolumeDown(input.volumeMax, input.volumeStep);
   if (lots < input.volumeMin) {
+    // On small accounts, the configured percentage may calculate less than
+    // the broker's minimum order size even though a minimum lot still fits
+    // inside the account-wide risk cap. Allow that minimum lot only when its
+    // actual stop-loss risk fits the remaining aggregate budget.
+    const minimumLots = Number((
+      Math.ceil((input.volumeMin - 1e-10) / input.volumeStep) * input.volumeStep
+    ).toFixed(8));
+    const minimumLotRiskUsd = minimumLots * input.slPips * input.pipValuePerLot;
+    const volumeCeiling = Math.min(input.volumeMax, input.maxLots);
+    const availableBudgetUsd = input.riskBudgetUsd ?? perTradeRiskUsd;
+    const riskToleranceUsd = Math.max(1e-8, availableBudgetUsd * 1e-9);
+    if (
+      input.riskBudgetUsd !== undefined &&
+      minimumLots >= input.volumeMin &&
+      minimumLots <= volumeCeiling + 1e-10 &&
+      minimumLotRiskUsd <= availableBudgetUsd + riskToleranceUsd
+    ) {
+      return { lots: minimumLots, riskUsd: minimumLotRiskUsd };
+    }
     return {
       lots: 0,
       riskUsd,
-      reason: input.riskBudgetUsd !== undefined && input.riskBudgetUsd < perTradeRiskUsd
-        ? `remaining open-risk budget ${riskUsd.toFixed(2)} USD supports ${rawLots.toFixed(4)} lot < volume_min ${input.volumeMin}; no safe minimum lot fits`
-        : `risk ${riskUsd.toFixed(2)} = ${rawLots.toFixed(3)} lot < volume_min ${input.volumeMin}`,
+      reason: input.riskBudgetUsd !== undefined
+        ? `broker minimum ${minimumLots} lot risks ${minimumLotRiskUsd.toFixed(2)} USD; remaining aggregate budget ${availableBudgetUsd.toFixed(2)} USD (per-trade target ${perTradeRiskUsd.toFixed(2)} USD); minimum lot does not fit safely`
+        : `risk ${riskUsd.toFixed(2)} USD supports ${rawLots.toFixed(4)} lot < volume_min ${input.volumeMin}; broker minimum lot cannot fit the configured per-trade risk`,
     };
   }
   return { lots, riskUsd: lots * input.slPips * input.pipValuePerLot };
