@@ -45,6 +45,13 @@ export interface ManagedPosition {
   trailDistance: number;
   best: number;
   atr: number;
+  trailActivated?: boolean;
+  /** Estimated USD value of a 1.0 price-unit move. */
+  profitPerPriceUnitUsd?: number;
+  /** Initial stop risk in USD for aggregate account-risk checks. */
+  riskUsd?: number;
+  lastBrokerStopMoveAt?: number;
+  lastValuationAttemptAt?: number;
 
   openedAt: number;
   /** boundary of the last trail ATR refresh */
@@ -75,6 +82,7 @@ export interface TradeLogEntry {
   volume?: number;
   price?: number;
   sl?: number;
+  riskUsd?: number;
   reason?: string;
   ok?: boolean;
 }
@@ -265,8 +273,16 @@ export class RiskExecutor {
         Number(position.emergencySl) > 0
           ? Number(position.emergencySl)
           : entry - sign * Math.max(atrValue * this.deps.config.emergencySlAtrFactor, pip);
-      const trailStop =
-        Number(position.trailStop) > 0 ? Number(position.trailStop) : emergencySl;
+      const initialStop = initialVirtualStop(side, entry, trailDistance);
+      const savedStop = Number(position.trailStop);
+      // Keep a previously locked-in-profit stop, but migrate old emergency-SL
+      // values to the nearer entry-anchored virtual stop.
+      const trailStop = Number.isFinite(savedStop) && savedStop > 0
+        ? (side === "buy" ? Math.max(initialStop, savedStop) : Math.min(initialStop, savedStop))
+        : initialStop;
+      const savedRiskUsd = Number(position.riskUsd);
+      const savedProfitPerPriceUnitUsd = Number(position.profitPerPriceUnitUsd);
+      const wasAlreadyProtected = side === "buy" ? trailStop >= entry : trailStop <= entry;
 
       this.managed.set(position.positionId, {
         positionId: position.positionId,
@@ -283,6 +299,13 @@ export class RiskExecutor {
         trailDistance,
         best: Number(position.best) || entry,
         atr: atrValue,
+        trailActivated: typeof position.trailActivated === "boolean"
+          ? position.trailActivated
+          : wasAlreadyProtected,
+        profitPerPriceUnitUsd: savedProfitPerPriceUnitUsd > 0 ? savedProfitPerPriceUnitUsd : undefined,
+        riskUsd: savedRiskUsd > 0 ? savedRiskUsd : undefined,
+        lastBrokerStopMoveAt: 0,
+        lastValuationAttemptAt: 0,
         openedAt: Number(position.openedAt) || Date.now(),
         // Force a fresh trail ATR read on the first manage tick after a restart.
         lastAtrSyncAt: 0,
@@ -327,6 +350,16 @@ export class RiskExecutor {
     const gate = this.tradingAllowed(view);
     if (!gate.ok) return { ok: false, reason: gate.reason };
     if (Date.now() > signal.expiresAt) return { ok: false, reason: "signal expired" };
+    if (view.positions.length >= this.deps.config.maxOpenPositions) {
+      return { ok: false, reason: `position cap ${this.deps.config.maxOpenPositions}` };
+    }
+    if (view.positions.some((position) => position.instrument === signal.symbol)) {
+      return { ok: false, reason: `position already open for ${signal.symbol}` };
+    }
+    const managedIds = new Set(this.managed.keys());
+    if (view.positions.some((position) => !managedIds.has(position.position_id))) {
+      return { ok: false, reason: "unmanaged position present; total account risk cannot be verified" };
+    }
 
     const quote = this.deps.ticks.get(signal.symbol);
     if (!quote || Date.now() - quote.timestamp > this.deps.config.maxQuoteAgeMs) {
@@ -375,11 +408,32 @@ export class RiskExecutor {
     if (quoteRate === undefined) {
       return { ok: false, reason: `no ${quoteCurrency}/USD conversion for sizing` };
     }
+    let accountCurrencyToUsd = quoteToUsdRate(view.currency.toUpperCase(), quotes);
+    if (accountCurrencyToUsd === undefined && view.currency.toUpperCase() !== "USD") {
+      await this.deps.ticks
+        .ensure([`${view.currency.toUpperCase()}USD`, `USD${view.currency.toUpperCase()}`], 1500)
+        .catch(() => []);
+      quotes = new Map(this.deps.ticks.store.all().map((entry) => [entry.symbol, entry] as const));
+      accountCurrencyToUsd = quoteToUsdRate(view.currency.toUpperCase(), quotes);
+    }
+    if (!(accountCurrencyToUsd && accountCurrencyToUsd > 0)) {
+      return { ok: false, reason: `no USD conversion for account currency ${view.currency}` };
+    }
+    if (!(view.balance > 0) || !(view.equity > 0) || !(view.freeMargin > 0)) {
+      return { ok: false, reason: "balance/equity/free margin not sufficient" };
+    }
+
+    const leverage = Number(view.leverage);
+    if (!Number.isFinite(leverage) || leverage <= 0) {
+      return { ok: false, reason: `invalid account leverage ${view.leverage}; refusing unsafe margin fallback` };
+    }
     const pipValuePerLot = contractSize * pip * quoteRate;
+    const sizingSlPips = Math.abs(execution - emergencySl) / pip;
+    const riskEquityUsd = Math.min(view.balance, view.equity) * accountCurrencyToUsd;
     const sizing = computeLots({
-      equity: this.deps.config.virtualEquity,
+      equity: riskEquityUsd,
       riskPct: this.deps.config.riskPct,
-      slPips: signal.slPips,
+      slPips: sizingSlPips,
       pipValuePerLot,
       volumeMin,
       volumeMax,
@@ -391,20 +445,45 @@ export class RiskExecutor {
     }
 
     const baseRate = baseToUsdRate(baseCurrency, quote.mid, quoteCurrency, quotes);
-    if (baseRate !== undefined) {
-      const leverage = Number(view.leverage);
-      const marginPerLot = (contractSize * baseRate) / (leverage > 0 ? leverage : 500);
-      const required = sizing.lots * marginPerLot * this.deps.config.marginBuffer;
-      if (required > view.freeMargin) {
-        return { ok: false, reason: `margin ${required.toFixed(2)} > free ${view.freeMargin.toFixed(2)}` };
-      }
+    if (!(baseRate && baseRate > 0)) {
+      return { ok: false, reason: `no USD conversion for margin currency ${baseCurrency}` };
+    }
+    // Convert notional from USD to account currency, then reserve free margin.
+    const marginPerLotAccount = (contractSize * baseRate) / leverage / accountCurrencyToUsd;
+    if (!(marginPerLotAccount > 0) || !Number.isFinite(marginPerLotAccount)) {
+      return { ok: false, reason: "invalid margin estimate" };
+    }
+    const usableMargin = Math.max(0, view.freeMargin) *
+      (1 - this.deps.config.marginReservePct / 100) /
+      Math.max(1, this.deps.config.marginBuffer);
+    const marginLots = roundVolumeDown(usableMargin / marginPerLotAccount, volumeStep);
+    const finalLots = Math.min(sizing.lots, marginLots);
+    if (finalLots < volumeMin) {
+      return {
+        ok: false,
+        reason: `free margin cap: ${view.freeMargin.toFixed(2)} ${view.currency}, reserve ${this.deps.config.marginReservePct}%`,
+      };
+    }
+
+    const plannedRiskUsd = finalLots * sizingSlPips * pipValuePerLot;
+    const currentManaged = [...this.managed.values()];
+    if (currentManaged.some((position) => !(Number(position.riskUsd) > 0))) {
+      return { ok: false, reason: "open position risk metadata unavailable; wait for it to close before adding risk" };
+    }
+    const openRiskUsd = currentManaged.reduce((sum, position) => sum + Number(position.riskUsd), 0);
+    const maxOpenRiskUsd = riskEquityUsd * this.deps.config.maxOpenRiskPct / 100;
+    if (openRiskUsd + plannedRiskUsd > maxOpenRiskUsd) {
+      return {
+        ok: false,
+        reason: `open risk cap ${openRiskUsd.toFixed(2)} + ${plannedRiskUsd.toFixed(2)} > ${maxOpenRiskUsd.toFixed(2)} USD`,
+      };
     }
 
     const beforeIds = new Set(view.positions.map((position) => position.position_id));
     const result = await this.deps.tools.open({
       symbol: signal.symbol,
       side: signal.side,
-      volume: sizing.lots,
+      volume: finalLots,
       stopLoss: emergencySl,
       comment: `ot-${signal.side}-${signal.score.toFixed(0)}`,
     });
@@ -456,10 +535,15 @@ export class RiskExecutor {
       pip,
       emergencySl,
       slOrderId: sltp?.order_id,
-      trailStop: initialVirtualStop(signal.side, entry, emergencySl),
+      trailStop: initialVirtualStop(signal.side, entry, trailDistance),
       trailDistance,
       best: signal.side === "buy" ? Math.max(entry, quote.bid) : Math.min(entry, quote.ask),
       atr: signal.atr,
+      trailActivated: false,
+      profitPerPriceUnitUsd: contractSize * quoteRate * Number(position.volume),
+      riskUsd: Number(position.volume) * sizingSlPips * pipValuePerLot,
+      lastBrokerStopMoveAt: 0,
+      lastValuationAttemptAt: 0,
       openedAt: Date.now(),
       lastAtrSyncAt: candleBoundary(this.deps.config.trailTimeframe),
       lastStopEnsureAt: sltp?.order_id ? Date.now() : 0,
@@ -476,8 +560,9 @@ export class RiskExecutor {
       volume: managed.volume,
       price: entry,
       sl: managed.emergencySl,
+      riskUsd: managed.riskUsd,
       reason:
-        `risk ${sizing.riskUsd.toFixed(2)} USD · emergency ${signal.slPips.toFixed(1)}p · ` +
+        `risk ${Number(managed.riskUsd ?? 0).toFixed(2)} USD · emergency ${(Math.abs(entry - emergencySl) / pip).toFixed(1)}p · ` +
         `trail ${(trailDistance / pip).toFixed(1)}p · score ${signal.score.toFixed(1)}`,
       ok: true,
     });
