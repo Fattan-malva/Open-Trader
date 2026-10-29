@@ -504,12 +504,19 @@ export class AgentEngine {
           continue;
         }
         this.entryRetryAt.set(triggerKey, Date.now() + 3_000);
+        const openReason = opened.reason ?? "rejected";
         this.record(
           "entry",
-          `open ditolak ${candidate.symbol}: ${opened.reason ?? "?"}`,
+          `open ditolak ${candidate.symbol}: ${openReason}`,
           "warn",
         );
-        tried.push(`${candidate.symbol}: ${opened.reason ?? "rejected"}`);
+        tried.push(`${candidate.symbol}: ${openReason}`);
+        // These are account-wide gates; retrying every remaining candidate in
+        // the same scan only wastes snapshot/order-rate budget.
+        if (/kill switch|daily loss limit|unmanaged position present|open position risk metadata unavailable|open risk cap|trade_mode|status inactive|no USD conversion for account currency/i.test(openReason)) {
+          this.record("entry", `remaining candidates paused by account gate: ${openReason}`, "warn");
+          break;
+        }
       }
 
       if (triggerSuppressed > 0 && Date.now() - this.lastTriggerHoldLogAt >= 10_000) {
