@@ -1,139 +1,94 @@
-# Open-Trader: Perubahan Kerja & Rekomendasi Simulasi
+# Trade analysis
 
-## Ringkasan Temuan (75 Closed Trades, 29 Oct 2026)
+> **Historical diagnosis, not a forecast.** The sample below describes 75 closed
+> trades recorded on 29 October 2026. It does not establish that subsequent code
+> changes improve returns. Trading can lose money; validate changes on demo.
 
-| Metrik | Nilai |
-|--------|-------|
-| Win rate | 62.2% (46/74) |
-| Net P/L | -$16.79 |
-| Avg win | +$0.22 |
-| Avg loss | -$0.96 |
-| Payoff ratio | 0.23 |
-| Flat | 1 |
+<p align="center">
+  <img src="docs/assets/performance-panel.svg" alt="Historical trade summary: 75 closed positions, 62.2% win rate, net loss of 16.79 US dollars, average win 0.22 dollars, average loss 0.96 dollars." width="100%">
+</p>
 
-**Diagnosis**: payoff ratio terbalik. Win rate tinggi tidak bisa mengimbangi kerugian per trade yang 4.4× lebih besar dari keuntungan. Akar masalah:
+## Observed results
 
-1. **Profit lock terlalu cepat** — stop ditarik ke break-even pada spread cushion saja, lalu ditutup oleh noise untuk scratch (+$0.03–$0.08).
-2. **Trail distance terlalu ketat** — 0.3×ATR pada M1 seringkali < 2 pips, jadi winner tidak punya ruang bernafas.
-3. **Tidak ada loss-side reaction** — posisi yang salah arah dibiarkan berlari ke SL penuh (-$1.0–$2.4).
-4. **Stacked same-symbol entries** — 17 simbol dibuka berulang (XAUUSD 11× SELL, XAUUSD247 11× SELL, BTCUSD 8× BUY). Ini memperbesar exposure berkorelasi.
+| Metric | Observed |
+| --- | ---: |
+| Closed trades | 75 |
+| Wins / losses / flat | 46 / 28 / 1 |
+| Win rate, excluding flat | 62.2% (46 / 74) |
+| Net realized P/L | **−$16.79** |
+| Average winning trade | +$0.22 |
+| Average losing trade | −$0.96 |
+| Payoff ratio, avg win / abs(avg loss) | **0.23** |
 
----
+Rounded trade averages do not reproduce the exact net total: the trade-level
+results carry more precision than the displayed two-decimal averages. Using the
+rounded values gives +$10.12 across wins and −$26.88 across losses (−$16.76
+combined), a $0.03 rounding difference from the recorded −$16.79.
 
-## Perubahan yang Sudah Diterapkan
+## What the sample suggests
 
-### 1. Profit-lock activation gate (`profitLockActivateR`)
-- **File**: `src/agents/config.ts`, `src/agents/risk-and-executor.ts`
-- **Default**: `0.5` (50% dari planned stop distance / R)
-- **Efek**: Stop tidak ditarik ke break-even hanya karena spread sudah tercover. Harus ada real profit ≥ 0.5R dulu.
+The win rate was positive, but average losses were about 4.4 times the average
+win. At this payoff ratio, a high win rate by itself was not enough to produce a
+positive result. The realized journal also showed repeated same-symbol entries,
+including 11 SELL opens each for XAUUSD and XAUUSD247. This indicates repeated
+exposure; it does not by itself prove that those entries caused a specific share
+of the net loss.
 
-### 2. Risk-relative post-lock trail (`profitTrailRiskFraction`)
-- **File**: `src/agents/risk-and-executor.ts`
-- **Logika baru**:
-  - peak < 1R → trail distance = 0.75R
-  - peak < 2R → trail distance = 0.50R
-  - peak ≥ 2R → trail distance = 0.35R (floor)
-- **Upper bound**: tidak melebihi `profitTrailAtrFactor × ATR` (default 0.25×ATR)
-- **Efek**: winner punya ruang untuk berkembang; trail tidak collapse ke < 1 pip.
+The journal does not retain enough per-position price history to reconstruct
+maximum favorable/adverse excursion (MFE/MAE) or replay the revised exit rules.
+Therefore the following are **implementation changes**, not backtest results:
 
-### 3. Adverse-side loss cut (`lossCutDistance`, `lossCutHit`)
-- **File**: `src/agents/trailing.ts`, `src/agents/risk-and-executor.ts`
-- **Default**:
-  - `lossCutRiskPct = 35` (35% dari planned stop distance)
-  - `lossCutAtrFactor = 0.8` (0.8 × ATR)
-  - `lossCutMinPips = 2`
-- **Logika**: cut distance = tighter of(0.35×R, 0.8×ATR), floored 2 pips.
-- **Efek**: posisi yang tidak pernah lock profit ditutup sebelum mencapai SL penuh. Mengurangi avg loss dari ~-$0.96 ke target ~-$0.35 (35% dari R).
+1. **Delayed profit protection** — wait for configured progress in R before
+   moving the virtual stop beyond entry; the default activation is 0.5R.
+2. **Risk-relative trail distance** — post-lock trailing uses peak progress in
+   R, bounded by configured ATR distance and the existing trail distance.
+3. **Adverse-side loss cut** — close a still-unlocked position when the tighter
+   configured risk-distance or ATR threshold is reached, subject to a minimum
+   distance.
+4. **Correct locked-profit display** — report zero unless the virtual stop is
+   beyond entry on the profitable side.
+5. **Close retry matching** — normalize underscore/hyphen broker codes before
+   matching already-closed responses.
+6. **Symbol exposure guard** — default one open position per symbol and a five-
+   minute cooldown after close.
 
-### 4. `lockedProfitUsd` yang benar
-- **File**: `src/agents/trailing.ts` (fungsi `lockedProfitDistance`), `src/agents/engine.ts`
-- **Fix**: sebelumnya stop di sisi loss masih dihitung sebagai "profit". Sekarang return 0 jika stop belum melewati entry.
-- **Dashboard**: kolom `LOCK $` ditambahkan di semua lebar tabel.
+## Risk controls now configured
 
-### 5. Retry close fix (`indicatesPositionAlreadyClosed`)
-- **File**: `src/agents/risk-and-executor.ts`
-- **Fix**: normalisasi `SCREAMING_SNAKE_CASE` ke space sebelum regex match. Menangani `REQUEST_POSITION_NOT_FOUND` dan varian.
+| Control | Default | Interpretation |
+| --- | ---: | --- |
+| Profit-lock activation | `0.5R` | Progress required before the first profit lock |
+| Loss cut risk bound | `35%` of R | One of two adverse-distance bounds |
+| Loss cut ATR bound | `0.8 × ATR` | The tighter valid risk/ATR bound is used |
+| Loss cut minimum | `2 pips` | Floors the calculated cut distance |
+| Open positions per symbol | `1` | Blocks same-symbol stacking |
+| Post-close cooldown | `5 minutes` | Blocks immediate symbol re-entry |
 
----
+These settings are configurable through `AGENT_PROFIT_LOCK_ACTIVATE_R`,
+`AGENT_LOSS_CUT_RISK_PCT`, `AGENT_LOSS_CUT_ATR`,
+`AGENT_LOSS_CUT_MIN_PIPS`, `AGENT_MAX_OPEN_PER_SYMBOL`, and
+`AGENT_SYMBOL_COOLDOWN_MS`. See [README configuration](README.md#configuration).
 
-## Simulasi Dampak (konseptual, karena log tidak menyimpan MFE/MAE penuh)
+## Simulation status
 
-Asumsi: R rata-rata ≈ $0.55 (dari data: avg win $0.22 pada 0.4R, avg loss $0.96 pada 1.0R).
+**No counterfactual P/L estimate is reported.** The old rough scenarios assumed
+how many winners would extend, how often the loss cut would trigger, and how
+much same-symbol stacking contributed to losses. Those quantities cannot be
+inferred from the available logs, so projected positive results would be
+misleading.
 
-### Skenario A — Sebelum perubahan (baseline)
-- 46 win × +$0.22 = +$10.12
-- 28 loss × -$0.96 = -$26.88
-- 1 flat × $0 = $0
-- **Net = -$16.76** (sesuai data aktual)
+A replayable simulation needs, at minimum, timestamped executable bid/ask per
+managed position, initial risk distance, stop changes, and final realized P/L
+including fees. Then apply each candidate rule to the same quote sequence,
+including spread and close slippage, and compare net P/L, average win/loss,
+maximum drawdown, and trade count. Until that data exists, run the new defaults
+on demo and compare against a fixed baseline over a predeclared sample.
 
-### Skenario B — Dengan `profitLockActivateR = 0.5` saja
-- Winner yang sebelumnya terkunci di +0.05R sekarang punya kesempatan mencapai +0.5R–1.0R.
-- Asumsi 30% dari 46 win naik dari +$0.15 ke +$0.45 (tetap 30% turun karena retracement).
-- Win avg naik ke ~$0.30.
-- **Net estimasi ≈ -$8.4** (masih negatif, tapi setengahnya).
+## Reproduce the sample summary
 
-### Skenario C — Dengan profit-lock + risk-relative trail
-- Winner yang survive ke >1R sekarang dilindungi oleh trail 0.50R, bukan 0.3×ATR.
-- Asumsi 15% dari win mencapai +1.5R, 5% mencapai +2.0R.
-- Win avg naik ke ~$0.38.
-- **Net estimasi ≈ -$3.5**.
+The source log was `.cache/trades/2026-10-29.jsonl`; it is local runtime data and
+is not committed. Close events with a `net … USD` reason were deduplicated by
+position ID. Win rate excludes the one flat trade.
 
-### Skenario D — Dengan profit-lock + trail + loss cut
-- Loss yang sebelumnya -$0.96 sekarang dipotong di -$0.35 (35% × R).
-- Asumsi 80% dari 28 loss terkena loss cut (sisanya masih ke SL penuh karena volatile gap).
-- Loss avg turun ke ~-$0.47.
-- **Net estimasi ≈ +$4.3** (positif!).
-
-### Skenario E — Dengan semua perubahan + anti-stacking (belum diterapkan)
-- Jika same-symbol stacking dihapus (max 1 posisi terbuka per simbol), exposure berkorelasi turun drastis.
-- Asumsi 17 simbol stacked menghasilkan 40% dari total loss.
-- **Net estimasi ≈ +$8–$12**.
-
----
-
-## Rekomendasi Konfigurasi untuk Uji Coba
-
-```bash
-# Profit lock: jangan terlalu cepat, tapi jangan terlambat
-AGENT_PROFIT_LOCK_ACTIVATE_R=0.5
-
-# Trail: biarkan winner bernafas
-AGENT_PROFIT_TRAIL_ATR=0.25
-AGENT_PROFIT_TRAIL_MIN_PIPS=0.3
-
-# Loss cut: potong sebelum parah
-AGENT_LOSS_CUT_RISK_PCT=35
-AGENT_LOSS_CUT_ATR=0.8
-AGENT_LOSS_CUT_MIN_PIPS=2
-
-# Emergency SL tetap lebar sebagai safety net
-AGENT_EMERGENCY_SL_ATR=1.5
-AGENT_MIN_STOP_PIPS=6
-```
-
----
-
-## Gap yang Masih Perlu Dikerjakan
-
-1. **Anti-stacking guard** — kode masih mengizinkan "Repeated entries on the same symbol". Perlu:
-   - `maxOpenPerSymbol: number` (default 1)
-   - atau `cooldownMsPerSymbol` (default 5 menit)
-   - atau keduanya.
-
-2. **Simulasi back-test** — log trade tidak menyimpan `best` (MFE) dan `worst` (MAE) per posisi. Untuk simulasi akurat, perlu menambahkan field `mfePrice` dan `maePrice` ke state managed position, lalu log saat close.
-
-3. **Typecheck** — `npx tsc --noEmit` belum dijalankan karena classifier block. Test 53/53 lulus, tapi typecheck formal masih pending.
-
-4. **Config test** — `loadAgentConfig` belum punya unit test. Perlu test untuk memastikan default baru (profitLockActivateR, lossCut*) ter-load dengan benar.
-
----
-
-## Test Coverage Baru
-
-| File | Test baru |
-|------|-----------|
-| `src/agents/trailing.test.ts` | `lockedProfitDistance`, `lossCutDistance`, `lossCutHit` |
-| `src/agents/risk-and-executor.test.ts` | `SCREAMING_SNAKE_CASE` retry normalization |
-| `src/cli/dashboard/panels.test.ts` | `LOCK $` column rendering |
-
-**Total test**: 53 (semua lulus).
+**Current automated checks:** `npm test` and `npm run typecheck`. These verify
+code behavior and types; neither proves profitability. Live broker behavior still
+requires demo testing.

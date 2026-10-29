@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">Open-Trader mark</title>
+  <desc id="desc">A dark terminal tile with a cyan upward trading path and amber node.</desc>
+  <rect width="128" height="128" rx="28" fill="#0b1220"/>
+  <path d="M25 86 46 62l16 13 32-38" fill="none" stroke="#38bdf8" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m84 37 10 0-1 11" fill="none" stroke="#fbbf24" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="46" cy="62" r="6" fill="#fbbf24"/>
+</svg>

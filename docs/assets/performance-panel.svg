@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 470" role="img" aria-labelledby="title desc">
+  <title id="title">Open-Trader performance diagnosis</title>
+  <desc id="desc">A dashboard-style panel showing 75 closed trades, 62.2 percent win rate, negative net P/L, and the payoff imbalance between average wins and losses.</desc>
+  <style>
+    .bg{fill:#0b1220}.panel{fill:#111c2e;stroke:#263852}.ink{fill:#e5eefb;font:600 16px ui-monospace,SFMono-Regular,Menlo,monospace}.muted{fill:#91a4bf;font:13px ui-monospace,SFMono-Regular,Menlo,monospace}.num{fill:#f8fbff;font:700 28px ui-monospace,SFMono-Regular,Menlo,monospace}.cyan{fill:#38bdf8}.amber{fill:#fbbf24}.red{fill:#fb7185}.green{fill:#34d399}.grid{stroke:#263852;stroke-width:1}.line{fill:none;stroke:#38bdf8;stroke-width:4;stroke-linecap:round;stroke-linejoin:round}.bar-red{fill:#fb7185}.bar-green{fill:#34d399}
+  </style>
+  <rect class="bg" width="1200" height="470" rx="24"/>
+  <text class="ink" x="42" y="46">OPEN-TRADER / TRADE DIAGNOSIS</text>
+  <text class="muted" x="42" y="70">75 closed trades · 29 Oct 2026 · realized data, not a forecast</text>
+  <g transform="translate(42 96)">
+    <rect class="panel" width="248" height="104" rx="14"/>
+    <text class="muted" x="20" y="30">CLOSED TRADES</text><text class="num" x="20" y="72">75</text><text class="green" x="170" y="72">62.2%</text>
+    <rect class="panel" x="266" width="248" height="104" rx="14"/>
+    <text class="muted" x="286" y="30">NET P/L</text><text class="num red" x="286" y="72">-$16.79</text><text class="muted" x="286" y="92">realized</text>
+    <rect class="panel" x="532" width="248" height="104" rx="14"/>
+    <text class="muted" x="552" y="30">AVG WIN</text><text class="num green" x="552" y="72">+$0.22</text><text class="muted" x="552" y="92">46 trades</text>
+    <rect class="panel" x="798" width="248" height="104" rx="14"/>
+    <text class="muted" x="818" y="30">AVG LOSS</text><text class="num red" x="818" y="72">-$0.96</text><text class="muted" x="818" y="92">28 trades</text>
+  </g>
+  <g transform="translate(42 238)">
+    <rect class="panel" width="650" height="188" rx="14"/>
+    <text class="ink" x="22" y="32">PAYOFF IMBALANCE</text>
+    <text class="muted" x="22" y="57">average realized result per trade</text>
+    <line class="grid" x1="190" y1="86" x2="610" y2="86"/>
+    <text class="muted" x="22" y="92">WIN</text><rect class="bar-green" x="190" y="72" width="96" height="24" rx="12"/><text class="ink" x="302" y="91">+$0.22</text>
+    <text class="muted" x="22" y="142">LOSS</text><rect class="bar-red" x="190" y="122" width="420" height="24" rx="12"/><text class="ink" x="622" y="141" text-anchor="end">-$0.96</text>
+    <text class="amber" x="22" y="174">Payoff ratio 0.23 — win rate alone cannot offset the loss size.</text>
+  </g>
+  <g transform="translate(718 238)">
+    <rect class="panel" width="440" height="188" rx="14"/>
+    <text class="ink" x="22" y="32">CONTROL LOOP</text>
+    <g class="muted">
+      <rect x="22" y="57" width="112" height="36" rx="8" fill="#1b2a40"/><text x="78" y="80" text-anchor="middle">SCREEN</text>
+      <rect x="162" y="57" width="112" height="36" rx="8" fill="#1b2a40"/><text x="218" y="80" text-anchor="middle">VALIDATE</text>
+      <rect x="302" y="57" width="112" height="36" rx="8" fill="#1b2a40"/><text x="358" y="80" text-anchor="middle">SIZE</text>
+    </g>
+    <path d="M136 75h20m-6-6 6 6-6 6M276 75h20m-6-6 6 6-6 6" fill="none" stroke="#38bdf8" stroke-width="2"/>
+    <g class="muted">
+      <rect x="22" y="112" width="182" height="36" rx="8" fill="#1b2a40"/><text x="113" y="135" text-anchor="middle">VIRTUAL TRAIL</text>
+      <rect x="232" y="112" width="182" height="36" rx="8" fill="#1b2a40"/><text x="323" y="135" text-anchor="middle">JOURNAL</text>
+    </g>
+    <path d="M205 130h22" fill="none" stroke="#38bdf8" stroke-width="2"/>
+    <text class="muted" x="22" y="174">Risk gates run before orders. Losses remain possible.</text>
+  </g>
+</svg>

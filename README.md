@@ -1,65 +1,150 @@
-# open-trader
+<p align="center">
+  <img src="docs/assets/faviconc.svg" width="112" alt="Open-Trader favicon mark">
+</p>
 
-Terminal trading system for the **Exness Trader API**. The dashboard and the
-live agent run in **one process**:
+<h1 align="center">Open-Trader</h1>
 
-```powershell
+<p align="center">
+  <strong>Terminal-native, risk-first trading automation for the Exness Trader API.</strong><br>
+  TypeScript · Node.js 22+ · Demo-first · No LLM · Virtual trailing stop
+</p>
+
+<p align="center">
+  <code>Node 22+</code>
+  <code>TypeScript</code>
+  <code>MIT</code>
+  <code>Demo-first</code>
+  <code>57 tests</code>
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#risk-model">Risk model</a> ·
+  <a href="#dashboard">Dashboard</a> ·
+  <a href="#configuration">Configuration</a> ·
+  <a href="#analysis">Analysis</a>
+</p>
+
+> [!WARNING]
+> **Experimental trading software.** Start on a demo account. Markets, spreads,
+> slippage, outages, and broker execution can produce losses. Nothing here is
+> financial advice, a profit claim, or a recommendation to trade.
+
+---
+
+## Why Open-Trader
+
+Open-Trader is a single-process terminal trading system. It scans M1/M5 market
+structure, validates executable prices, sizes positions from live account data,
+and manages every account position with an emergency broker stop plus a virtual
+trailing stop.
+
+| Built for | Not built for |
+| --- | --- |
+| Transparent rule-based execution | Profit guarantees or black-box signals |
+| Demo-account iteration | Unattended production use without monitoring |
+| Fast terminal feedback | High-frequency or latency-arbitrage trading |
+| Account-wide risk controls | A replacement for broker safeguards |
+
+```mermaid
+flowchart LR
+  A[Fresh quotes] --> B[Screen M1 / M5]
+  B --> C[Validate setup]
+  C --> D[Size from live account]
+  D --> E[Broker order + emergency SL]
+  E --> F[Virtual trail + loss cut]
+  F --> G[Journal + dashboard]
+
+  C -. stale quote / spread / score .-> X[Reject]
+  D -. margin / daily loss / exposure .-> X
+```
+
+## Quick start
+
+**Requirements:** Node.js 22+, an Exness Trader API key, and an Exness **demo**
+account.
+
+```bash
 npm install
+cp .env.example .env
+# Fill EXNESS_API_KEY, EXNESS_PRIVATE_KEY, and EXNESS_ACCOUNT_ID in .env.
 npm start
 ```
 
-`npm start` renders the full-screen board and starts the fast M1/M5 agent against
-the account in `.env`. It is demo-first and deterministic (plain TypeScript
-rules, no LLM). Use it on a demo account while tuning; profitability is not
-guaranteed.
+Read-only snapshot; it never opens orders:
 
-## What it does
-
-```
-every 2 s ──► fast screener (M5 trend + cached M1 pullback/breakout + adaptive spread)
-          ──► entry (M1 confirmation + fresh executable quote)
-          ──► risk (live account sizing + margin/risk limits + emergency SL)
-          ──► trader (dynamic virtual trailing, no TP)
+```bash
+npm start -- --once
 ```
 
-- **Screener** ranks fresh quotes every 2 seconds. The shortlist reserves capacity
-  for FX, metals, crypto and energy instead of allowing one category to dominate;
-  XAUUSD is pinned whenever it has a fresh quote within the hard spread cap, while
-  remaining category slots rotate so quieter supported symbols are eventually scanned.
-  M1/M5 candle history remains asynchronous and cached. Stocks and indices remain
-  excluded because the current public trading/market-data API path does not serve them.
-  Metal, crypto and energy spread caps can be tuned independently, with a per-symbol
-  rolling baseline and spike guard still in force.
-- **Entry** validates the selected setup, confirmation candle, RSI exhaustion, signal-distance,
-  spread cost versus TS VIRT distance, and the latest executable quote. The executor rechecks
-  spread and executable price immediately before order submission.
-- **Risk** sizes from current account balance/equity (converted to USD for
-  sizing), validates actual account leverage, caps volume by available free
-  margin while reserving a buffer, and enforces aggregate open-risk and
-  daily-loss limits. If the target lot rounds below broker minimum, the executor
-  can use the broker minimum only when its real stop-loss risk fits the remaining
-  aggregate open-risk budget; otherwise it records the exact risk/minimum-lot reason.
-  Valid setups can add repeated entries on the same symbol; no fixed total-position
-  count is imposed. It opens a market order with a
-  **broker emergency stop-loss**
-  and never sends a take-profit.
-- **Trader** starts TS VIRT from the actual fill and fast-ATR distance rather
-  than copying the distant emergency SL. It locks profit as soon as the
-  executable side clears entry by spread + the configured buffer, then follows
-  the best executable price by a tight dynamic ATR/pip distance, ratchets only
-  toward profit, and attempts to tighten the broker emergency SL.
-- **Dynamic account management**: the broker snapshot is the source of truth.
-  Any open position the bot does not track yet is adopted from broker data
-  (entry, SL, volume, instrument conditions) regardless of who opened it.
-  Positions without an SL get an ATR/spread-based emergency SL first. This
-  means no manual entry or pre-existing bot history is required, and every
-  position on the account is managed by TS.
-- The broker SL is the crash safety net; the dashboard shows both the broker SL
-  and the live `TS VIRT` level on every position row.
+Development checks:
+
+```bash
+npm test
+npm run typecheck
+```
+
+> [!TIP]
+> Keep the initial run small: verify access-point discovery, quotes, dashboard
+> rendering, and rejection reasons before enabling any live trading mode.
+
+## Risk model
+
+Open-Trader treats the broker stop-loss as the crash safety net, not the normal
+exit engine. The executor uses live account balance/equity, broker conditions,
+free margin, aggregate risk, daily loss, current spread, and fresh executable
+bid/ask prices before an order is sent.
+
+| Guard | Default | What it blocks |
+| --- | ---: | --- |
+| Risk per trade | `0.1%` | Oversized single positions |
+| Aggregate open risk | `2%` | Account-level overexposure |
+| Daily-loss cutoff | `3%` | New entries after material daily loss |
+| Free-margin reserve | `25%` + buffer | Margin exhaustion |
+| Max open positions / symbol | `1` | Same-symbol stacking |
+| Re-entry cooldown | `5 min` | Immediate re-entry churn |
+| Quote age | `8 s` | Decisions on stale prices |
+| Loss cut | `min(35% R, 0.8 × ATR)` | Losers reaching the full emergency stop |
+
+### Trade lifecycle
+
+```mermaid
+stateDiagram-v2
+  [*] --> Screened
+  Screened --> Rejected: spread / score / quote / risk gate
+  Screened --> Submitted: executable setup valid
+  Submitted --> Managed: broker fill confirmed
+  Managed --> Protected: profit >= activation R
+  Managed --> Closed: loss cut / virtual stop / kill switch
+  Protected --> Closed: virtual stop / kill switch
+  Rejected --> [*]
+  Closed --> [*]
+```
+
+<details>
+<summary><strong>What happens after an entry?</strong></summary>
+
+1. A market order is sent with a broker emergency stop-loss; no take-profit is
+   sent.
+2. The virtual trail starts from the actual fill, using the executable bid for
+   BUYs and ask for SELLs.
+3. Profit protection waits for real progress: default `0.5R`, not merely the
+   spread cushion.
+4. Once protected, the virtual stop only ratchets toward profit; it never
+   loosens.
+5. A position that never reaches protection can be closed at the adverse-side
+   loss-cut threshold before the wide emergency stop is hit.
+6. Every close, reject, protect, error, and trailing change is journaled.
+
+</details>
 
 ## Dashboard
 
-```
+The full-screen dashboard and live agent run in one process. It shows account
+health, screener/entry/trader activity, virtual and broker stops, current P/L,
+and `LOCK $`: the USD profit protected beyond entry by the virtual stop.
+
+```text
 open-trader · DEMO
   BALANCE / EQUITY / FREE MARGIN / POSITIONS
   SCREENER · ENTRY · TRADER        (side-by-side containers)
@@ -70,246 +155,141 @@ open-trader · DEMO
   EVENTS · ORDERS
 ```
 
-The board is scrollable and the footer stays pinned. The agent is interactive:
-it only trades when `stdout` is a TTY. `--once` (or a non-TTY run) is a
-read-only snapshot.
-
-### Keys
-
 | Key | Action |
 | --- | --- |
-| `q` / `Ctrl+C` | quit the dashboard and stop the agent |
-| `p` | pause / resume account polling |
-| `a` | show / hide agent containers + log |
-| `c` | show / hide equity + drawdown charts |
-| `o` | show / hide orders |
-| `e` | show / hide events |
-| `r` | force a fresh REST snapshot |
-| `x`, then `y` | arm / confirm kill switch: block entries + close every position (`n` cancels) |
-| `u` | remove the kill switch flag (`unkill`) |
-| `↑` / `↓`, `j` / `k` | scroll one line |
-| `PgUp` / `PgDn` | scroll ten lines |
-| `g` / `G` | jump to top / bottom |
+| `q` / `Ctrl+C` | Quit dashboard and stop agent |
+| `p` | Pause / resume account polling |
+| `a` | Show / hide agent containers and log |
+| `c` | Show / hide equity and drawdown charts |
+| `o` / `e` | Show / hide orders or events |
+| `r` | Force a REST snapshot refresh |
+| `x`, then `y` | Persist kill switch, block entries, close all positions |
+| `u` | Remove persistent kill switch |
+| `↑` / `↓`, `j` / `k` | Scroll one line |
+| `PgUp` / `PgDn`, `g` / `G` | Navigate dashboard history |
 
-The kill switch is persisted in `.cache/KILL`. While it is on, the agent closes
-every open position (including positions it did not open) and refuses new
-entries. `u` removes the flag; `x`/`y` turns it on.
+The kill switch lives at `.cache/KILL`. While it exists, new entries are refused
+and every open account position—including externally opened positions—is closed.
 
-### Other invocations
+## Analysis
 
-```powershell
-npm start -- --once        # one read-only frame, no agent, exits
-npm start -- --for 30      # interactive, auto-exit after 30 s
-```
+The latest realized-book diagnosis is kept in [ANALYSIS.md](ANALYSIS.md).
+It intentionally separates observed results from hypothetical impact estimates.
 
-There are no other application commands. `npm test` and `npm run typecheck`
-exist for development.
+<p align="center">
+  <img src="docs/assets/performance-panel.svg" alt="Performance diagnosis: 75 closed trades, 62.2% win rate, net P/L minus 16.79 dollars, average win plus 0.22 dollars, average loss minus 0.96 dollars." width="100%">
+</p>
+
+The visualization is static and GitHub-renderable. It summarizes a historical
+sample; it is **not** a performance forecast, live account balance, or evidence
+of future profitability.
 
 ## Configuration
 
-`.env` must contain:
+Create `.env` from [`.env.example`](.env.example). Never commit the private key.
 
 ```ini
 EXNESS_API_KEY=exnsk-...
-EXNESS_PRIVATE_KEY=...            # 128-char hex key pair, 64-char hex seed, or PEM
+EXNESS_PRIVATE_KEY=...            # 128-char hex pair, 64-char seed, or PEM
 EXNESS_ACCOUNT_ID=31000172947
 EXNESS_DISCOVERY_URL=https://api.exness.com
 ```
 
-`EXNESS_API_SECRET` is still accepted as a fallback name for the private key.
-`EXNESS_ACCESS_POINT` can pin the access point and skip discovery.
+`EXNESS_API_SECRET` remains a fallback name for the private key.
+`EXNESS_ACCESS_POINT` can pin a discovered access point.
 
 ### Strategy defaults
 
-All values are environment-overridable; the defaults are tuned for the demo
-account.
+All values are environment-overridable. Defaults target controlled demo-account
+iteration, not maximized trade frequency.
 
-| Setting | Default | Env |
+| Setting | Default | Environment variable |
 | --- | --- | --- |
-| Screener / confirmation / trail timeframe | `M1` | `AGENT_SCREENER_TF`, `AGENT_CONFIRM_TF`, `AGENT_TRAIL_TF` |
-| Trend timeframe | `M5` | `AGENT_TREND_TF` |
-| Scan interval | 2 s; not candle-aligned by default | `AGENT_SCAN_INTERVAL_MS`, `AGENT_ALIGN_SCAN_TO_CANDLE` |
-| Manage cadence | 1 s | `AGENT_MANAGE_INTERVAL_MS` |
-| Shortlist / candidates | 20 / 20 | `AGENT_SHORTLIST`, `AGENT_MAX_CANDIDATES` |
-| Minimum score | 10 | `AGENT_MIN_SCORE` |
-| Pullback RSI band | 20–80 | `AGENT_RSI_MIN`, `AGENT_RSI_MAX` |
-| Pullback to M1 EMA50 | ≤ 3.0×ATR | `AGENT_PULLBACK_ATR` |
-| M5 trend separation | ≥ 0.003×ATR | `AGENT_MIN_TREND_ATR` |
-| FX / generic non-FX spread cap | ≤ 5 pips / ≤ 0.08% | `AGENT_MAX_SPREAD_PIPS`, `AGENT_MAX_SPREAD_PCT` |
-| Metal / crypto / energy spread caps | ≤ 0.12% / ≤ 0.20% / ≤ 0.12% | `AGENT_MAX_METAL_SPREAD_PCT`, `AGENT_MAX_CRYPTO_SPREAD_PCT`, `AGENT_MAX_ENERGY_SPREAD_PCT` |
-| Per-symbol spread spike guard | ≤ 2.5× rolling median | `AGENT_MAX_SPREAD_SPIKE_RATIO` |
-| Breakout range / candle body | 5 bars / ≥ 0.08×ATR | `AGENT_BREAKOUT_LOOKBACK`, `AGENT_BREAKOUT_BODY_ATR` |
-| Breakout RSI exhaustion | BUY ≤ 82 / SELL ≥ 18 | `AGENT_BREAKOUT_RSI_CEILING`, `AGENT_BREAKOUT_RSI_FLOOR` |
-| Spread cost | ≤ 40% of trail | `AGENT_MAX_SPREAD_TRAIL` |
-| Initial virtual trail | max(1.2×M1 ATR, 4 pips) | `AGENT_TRAIL_ATR`, `AGENT_TRAIL_MIN_PIPS` |
-| First profit lock | Requires entry ± max(spread+min pips, `AGENT_PROFIT_LOCK_ACTIVATE_R` × R) before stop pulled to break-even | `AGENT_PROFIT_LOCK_ACTIVATE_R`, `AGENT_PROFIT_LOCK_MIN_PIPS` |
-| Post-lock trail | min(`AGENT_PROFIT_TRAIL_ATR` × ATR, risk-relative fraction × R, current distance), then never widens | `AGENT_PROFIT_TRAIL_ATR`, `AGENT_PROFIT_TRAIL_MIN_PIPS` |
-| Adverse-side cut | Market close once adverse move ≥ min(`AGENT_LOSS_CUT_RISK_PCT`% × R, `AGENT_LOSS_CUT_ATR` × ATR), floored by `AGENT_LOSS_CUT_MIN_PIPS` | `AGENT_LOSS_CUT_RISK_PCT`, `AGENT_LOSS_CUT_ATR`, `AGENT_LOSS_CUT_MIN_PIPS` |
-| Broker emergency SL | 1.5×M1 ATR, min 6 pips / 3× spread | `AGENT_EMERGENCY_SL_ATR`, `AGENT_MIN_STOP_PIPS` |
-| Broker SL update cadence / minimum move | 10 s / 2 pips | `AGENT_BROKER_STOP_UPDATE_MS`, `AGENT_BROKER_STOP_MOVE_MIN_PIPS` |
-| Max chase | 1.5×ATR | `AGENT_MAX_CHASE_ATR` |
-| Max quote age | 8 s | `AGENT_MAX_QUOTE_AGE_MS` |
-| Sizing equity | min(actual balance, equity), converted to USD | account snapshot + market quotes |
-| Risk per trade | 0.1% target; minimum broker lot may exceed the target only if its actual SL risk fits within remaining aggregate cap | `AGENT_RISK_PCT` |
-| Max lots per trade | 0.5 | `AGENT_MAX_LOTS` |
-| Re-entry trigger | new valid closed candle or favourable move ≥ max(0.2×ATR, 1 pip) | `AGENT_REENTRY_STEP_ATR`, `AGENT_REENTRY_MIN_PIPS` |
-| Same-symbol entries | Max `AGENT_MAX_OPEN_PER_SYMBOL` per symbol; `AGENT_SYMBOL_COOLDOWN_MS` cooldown after close | executor |
-| Aggregate open-risk cap | 2% of account equity, re-sized to remaining budget | `AGENT_MAX_OPEN_RISK_PCT` |
-| Open risk calculation | Current confirmed broker SL and stored USD pip value; TS VIRT never reduces risk | executor |
-| Daily-loss entry cutoff | 3% of day-start balance | `AGENT_MAX_DAILY_LOSS_PCT` |
-| Free-margin reserve | 25% plus 3× margin buffer | `AGENT_MARGIN_RESERVE_PCT`, `AGENT_MARGIN_BUFFER` |
+| Scan / manage cadence | `2 s` / `1 s` | `AGENT_SCAN_INTERVAL_MS`, `AGENT_MANAGE_INTERVAL_MS` |
+| Timeframes | screener `M1`, trend `M5`, confirm/trail `M1` | `AGENT_*_TF` |
+| Shortlist / candidates | `20` / `20` | `AGENT_SHORTLIST`, `AGENT_MAX_CANDIDATES` |
+| Risk per trade | `0.1%` | `AGENT_RISK_PCT` |
+| Aggregate risk / daily cutoff | `2%` / `3%` | `AGENT_MAX_OPEN_RISK_PCT`, `AGENT_MAX_DAILY_LOSS_PCT` |
+| Initial virtual trail | `max(1.2 × ATR, 4 pips)` | `AGENT_TRAIL_ATR`, `AGENT_TRAIL_MIN_PIPS` |
+| Profit-lock activation | `0.5R` | `AGENT_PROFIT_LOCK_ACTIVATE_R` |
+| Profit-lock cushion | spread + `0.5 pip` | `AGENT_PROFIT_LOCK_MIN_PIPS` |
+| Post-lock trail | tighter ATR / risk-relative target | `AGENT_PROFIT_TRAIL_ATR`, `AGENT_PROFIT_TRAIL_MIN_PIPS` |
+| Loss cut | `min(35% R, 0.8 × ATR)`, floor `2 pips` | `AGENT_LOSS_CUT_RISK_PCT`, `AGENT_LOSS_CUT_ATR`, `AGENT_LOSS_CUT_MIN_PIPS` |
+| Emergency broker stop | `max(1.5 × ATR, 6 pips, 3 × spread)` | `AGENT_EMERGENCY_SL_ATR`, `AGENT_MIN_STOP_PIPS` |
+| Same-symbol exposure | `1` open / `5 min` cooldown | `AGENT_MAX_OPEN_PER_SYMBOL`, `AGENT_SYMBOL_COOLDOWN_MS` |
+| Max quote age / chase | `8 s` / `1.5 × ATR` | `AGENT_MAX_QUOTE_AGE_MS`, `AGENT_MAX_CHASE_ATR` |
 
-`minAtrPct` / `maxAtrPct` (`AGENT_MIN_ATR_PCT`, `AGENT_MAX_ATR_PCT`) reject
-instruments whose M1 ATR is too quiet or too wild.
+<details>
+<summary><strong>Execution and market filters</strong></summary>
 
-### Trailing behaviour
+- M1/M5 trend, pullback, breakout, RSI exhaustion, candle-body, and signal-score
+  validation gate each candidate.
+- FX, metal, crypto, and energy use separate spread caps; a rolling per-symbol
+  spread-spike guard remains in force.
+- The order executor rechecks the live executable price and spread immediately
+  before submission.
+- Broker minimum lot is used only if its actual emergency-stop risk fits the
+  remaining aggregate risk budget.
+- Any untracked account position is adopted dynamically; a missing broker SL is
+  created before normal virtual-trail management begins.
 
-- **BUY** tracks the highest bid; the virtual stop ratchets only upward.
-- **SELL** tracks the lowest ask; the virtual stop ratchets only downward.
-- A new M1 ATR is read at each closed M1 candle. If ATR shrinks, the stop may
-  tighten; if ATR grows, the stop does not loosen.
-- TS VIRT consumes each live tick directly, rather than waiting only for
-  the account-management timer. BUY tracks the highest executable bid and the
-  stop ratchets only upward; SELL tracks the lowest executable ask and the stop
-  ratchets only downward.
-- The first published TS VIRT update happens as soon as the executable side
-  clears entry by the current spread plus the configured buffer. **Before** the
-  cushion is published, however, the stop is not pulled to break-even on spread
-  alone: it requires real progress of at least `AGENT_PROFIT_LOCK_ACTIVATE_R` × R
-  (default 0.5R). This prevents the old behaviour where noise closed every
-  winner a fraction of a pip in the green.
-- After the first profit lock, the trail distance is the tighter of
-  `AGENT_PROFIT_TRAIL_ATR` × ATR and a risk-relative fraction of R that relaxes
-  as the trade runs (0.75R → 0.50R → 0.35R); the distance and stop level never
-  move backwards. When ATR refreshes or volatility expands, the active distance
-  is never widened.
-- No fixed USD activation threshold is used. BUY profit lock requires a stop
-  above entry; SELL profit lock requires a stop below entry.
-- A losing position that never locked profit is market-closed once the adverse
-  move reaches the tighter of `AGENT_LOSS_CUT_RISK_PCT`% × R and
-  `AGENT_LOSS_CUT_ATR` × ATR (floored by `AGENT_LOSS_CUT_MIN_PIPS`); see the
-  config table. This stops losers running to the full broker emergency SL.
-- Only one position per symbol is allowed (`AGENT_MAX_OPEN_PER_SYMBOL`,
-  default 1) and a `AGENT_SYMBOL_COOLDOWN_MS` quiet period (default 5 min)
-  applies after a close before the same symbol may be re-entered. This prevents
-  the stacked same-symbol pyramiding seen in the realized book.
-- A BUY closes when a fresh quote has `bid ≤ TS VIRT`; a SELL closes when a
-  fresh quote has `ask ≥ TS VIRT`. The quote is revalidated after ATR/API awaits,
-  and stale quotes cannot trigger a TS close.
-- After profit-lock activation, the agent periodically tries to move the broker
-  emergency SL in the protective direction. Broker minimum-distance rules may
-  reject stops that are too close; failures are written to the log.
-- Realized P/L can still differ because of spread, commission, and slippage.
+</details>
 
-Example: a BUY entry at `1.0850` with an 8-pip virtual distance starts at
-`1.0842`. As the best bid rises to `1.0900`, TS VIRT ratchets toward `1.0892`.
-If price later falls, the stop stays at its latest ratcheted level; when bid
-reaches TS VIRT, the position is closed.
+## Architecture
 
-## Agent state and audit
-
+```text
+src/
+├─ agents/       scan, validate, size, execute, trail, journal
+├─ cli/          arguments, terminal rendering, dashboard panels
+├─ exness/       signing, REST client, WebSocket, catalog, API types
+├─ market/       candles, indicators, quote store, timeframes
+├─ monitor/      equity sampling and daily metrics
+├─ runtime/      tick/event hubs, snapshots, execution correlation
+└─ tools/        broker-facing read-only and trading operations
 ```
-.cache/agent-state.json           managed positions, broker SL / virtual stop, stats, journal
-.cache/trades/YYYY-MM-DD.jsonl    open / trail / close / protect / skip / error events
+
+### Persistent audit trail
+
+```text
+.cache/agent-state.json           managed positions, broker/virtual stops, stats
+.cache/trades/YYYY-MM-DD.jsonl    open / trail / close / protect / skip / error
 .cache/equity/YYYY-MM-DD.jsonl    equity samples for charts
 .cache/events/YYYY-MM-DD.jsonl    raw runtime events
-.cache/KILL                       persistent kill switch flag
-.cache/tick-unsupported.json      symbols the broker refuses to stream
+.cache/KILL                       persistent kill-switch state
+.cache/tick-unsupported.json      rejected WebSocket instruments
 ```
 
-State is written after every manage tick and on clean shutdown. A restart
-restores managed positions, the virtual stop, best price, trail distance and the
-emergency SL, then reconciles them against the broker. Every open position on
-the account is managed dynamically: unknown positions are adopted from broker
-data (entry, SL, volume, instrument conditions) and positions without an SL
-receive an ATR/spread-based emergency SL first. No manual entry or pre-existing
-bot history is required.
+## Exness integration and trademarks
 
-## Rate limits and resilience
+Open-Trader integrates with the **Exness Trader API** through locally signed REST
+and WebSocket calls. It is an independent open-source project, **not affiliated
+with, endorsed by, sponsored by, or supported by Exness**. “Exness” and related
+marks are trademarks of their respective owner. This repository deliberately uses
+its own Open-Trader mark rather than an Exness logo.
 
-- Account-wide REST limits: global 10/s, candles 2/s, snapshot 2/s, order
-  mutations 4/s.
-- WebSocket tick subscriptions are token-bucketed at 20/s and sent one
-  instrument per message. A rejected symbol (`4000`) is remembered in
-  `.cache/tick-unsupported.json` and never retried, so one bad ticker cannot
-  loop the whole feed.
-- `400/3015 REQUEST_RATE_LIMIT` is retried with 1.5 s → 3 s → 6 s backoff (capped
-  at 10 s). The manage loop also backs off for 15 s if the shared bucket is
-  saturated. Run only one live agent per account.
-- The watchdog logs feed stalls and restarts a closed/wedged tick socket after
-  45 s, then resubscribes.
-- Async execution subscribes to `/ws/events` before sending an order and
-  correlates the ACK / `transaction_event` by `client_request_id`, with polling
-  as a fallback. Orders send only `stop_loss_price` (no take-profit).
+## Security
 
-## How it works
+- `.env` contains a signing key. It is gitignored; never paste it into chats,
+  issues, logs, or screenshots.
+- The CLI only prints a shortened API-key prefix.
+- Rotate a key in the broker’s key-management interface if exposure is suspected.
+- Run one live agent per account to respect shared rate limits.
 
-```
-src/
-├─ config.ts              .env loading (no dotenv) + validation
-├─ exness/
-│  ├─ signing.ts          hex/PEM → Ed25519 key, EXN-DATA + EXN-SIGN headers
-│  ├─ client.ts           access-point discovery + cache, signed REST, retry, rate limit
-│  ├─ ws.ts               signed WebSocket handshake, heartbeat, reconnect + resubscribe
-│  ├─ catalog.ts          instrument catalog + per-instrument conditions (cached)
-│  └─ types.ts            subset of trading.public.yaml v1.0.2
-├─ market/
-│  ├─ candles.ts          candle normalisation + pip/point helpers
-│  ├─ indicators.ts       EMA/SMA/RSI/ATR
-│  └─ store.ts            last tick per symbol, quotes, formatting
-├─ runtime/
-│  ├─ hubs.ts             TickHub / EventHub, one-instrument subscriptions, token bucket
-│  ├─ snapshot.ts         account snapshot cache (1200 ms TTL, invalidate)
-│  └─ execution.ts        ACK/event correlation, operation polling, order gateway
-├─ tools/
-│  ├─ index.ts            read-only candle history
-│  └─ trading.ts          open / patch-or-create SLTP / close
-├─ monitor/equity.ts      daily equity samples + start balance
-├─ agents/
-│  ├─ config.ts           thresholds and sizing
-│  ├─ screener.ts         M15 trend + M1 pullback/breakout ranking
-│  ├─ entry.ts            Setup-aware confirmation, spread cost, fast-ATR emergency stop
-│  ├─ spread.ts           Hard caps + per-symbol rolling spread-spike detection
-│  ├─ risk-and-executor.ts sizing, gating, virtual trailing, adoption, kill close
-│  ├─ engine.ts           M1 scan loop, manage loop, watchdog, state writer
-│  ├─ runtime.ts          wires the live agent to the dashboard context
-│  ├─ journal.ts          per-agent activity feed for the dashboard
-│  └─ trailing.ts         pure virtual stop / best-price / hit math
-└─ cli/                   args, ANSI rendering, charts, dashboard
-```
+## Contributing
 
-## Development
+Keep changes small, deterministic, and test-backed.
 
-```powershell
+```bash
 npm test
 npm run typecheck
 ```
 
-Regression tests cover entry-anchored BUY/SELL virtual stops, monotonic
-ratcheting, executable-side stop-hit logic, FX/non-FX adaptive spread guards,
-closed-candle breakout scoring, setup-aware entry validation, stale quotes and
-rolling 60-second tick activity. Live broker/account behavior still needs
-integration and demo testing.
+Regression coverage includes virtual-stop monotonicity, executable-side stop
+hits, spread guards, breakout scoring, entry validation, re-entry behavior,
+loss-cut math, close-retry normalization, dashboard width, and catalog handling.
+Broker/account behavior still requires demo-account integration testing.
 
-## Troubleshooting
+## License
 
-| Symptom | Meaning |
-| --- | --- |
-| `401/1001` | Signature mismatch — key format, payload bytes, body hash or base64url padding. |
-| `401/1000` | API key missing/expired, or `EXN-DATA.api_key` ≠ `EXN-API-KEY`. |
-| `403/1002` | API key has no access to this account/IP/scope. |
-| `404/2000` | Account not found for this key. |
-| `400/3005` | `REQUEST_INVALID_COUNT` — candles need `count` or `to`, not just `from`. |
-| `400/3015` | Request rate limit. Wait for the built-in backoff and run one agent only. |
-| `400/4000` | `MARKET_INSTRUMENT_NOT_FOUND` — a symbol is not subscribable; remembered and never retried. |
-| `400/4001` | `MARKET_TRADE_DISABLED` — instrument is visible but not tradable; skipped. |
-| `400/5005` | Stop/take-profit is on the wrong side or too tight for the broker. |
-| Repeated `503` | Service unavailable; retry later. |
-
-## Security
-
-- `.env` holds a live signing key: it is gitignored, never bundled and only read
-  locally. Do not paste it into chats, issues or screenshots.
-- The CLI prints only a key prefix (`exnsk-…`).
-- Rotate the key in Exness Key Management if it was ever exposed, then update
-  `.env`. Iterate on a demo account.
+Released under the [MIT License](LICENSE). See [NOTICE](NOTICE) for third-party
+trademark attribution.
