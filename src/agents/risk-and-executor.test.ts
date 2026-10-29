@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { computeLots } from "./risk-and-executor.js";
+import { closeRetryDelayMs, computeLots, indicatesPositionAlreadyClosed } from "./risk-and-executor.js";
 
 const common = {
   equity: 1_000,
@@ -32,4 +32,25 @@ test("retains normal per-trade sizing when no aggregate budget is supplied", () 
   const sized = computeLots(common);
   assert.equal(sized.lots, 0.5);
   assert.equal(sized.riskUsd, 5);
+});
+
+test("price-movement close failures retry faster than general close failures", () => {
+  assert.equal(closeRetryDelayMs(1, "off quotes"), 200);
+  assert.equal(closeRetryDelayMs(2, "price changed"), 400);
+  assert.equal(closeRetryDelayMs(1, "internal server error"), 250);
+  assert.equal(closeRetryDelayMs(2, "internal server error"), 500);
+});
+
+test("close retry backoff is bounded and rate limits are respected", () => {
+  assert.equal(closeRetryDelayMs(20, "price deviation"), 2_000);
+  assert.equal(closeRetryDelayMs(20, "server internal error"), 5_000);
+  assert.equal(closeRetryDelayMs(1, "HTTP 429 rate limit"), 1_500);
+  assert.equal(closeRetryDelayMs(4, "too many requests"), 10_000);
+});
+
+test("detect broker responses indicating a position already closed", () => {
+  assert.equal(indicatesPositionAlreadyClosed("position not found"), true);
+  assert.equal(indicatesPositionAlreadyClosed("Position is already closed"), true);
+  assert.equal(indicatesPositionAlreadyClosed("off quotes"), false);
+  assert.equal(indicatesPositionAlreadyClosed("market closed"), false);
 });
