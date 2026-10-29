@@ -37,7 +37,7 @@ const TS_CLOSE_RETRY_MAX_MS = 5_000;
 export function closeRetryDelayMs(attempt: number, message = ""): number {
   const error = message.toLowerCase();
   const exponent = Math.max(0, Math.min(6, Math.trunc(attempt) - 1));
-  if (/rate.?limit|too many requests|http 429|\\b429\\b/.test(error)) {
+  if (/rate.?limit|too many requests|http 429|\b429\b/.test(error)) {
     return Math.min(10_000, 1_500 * (2 ** Math.min(exponent, 3)));
   }
   if (/off quotes|requote|price changed|price moved|quote expired|price deviation|market price changed/.test(error)) {
