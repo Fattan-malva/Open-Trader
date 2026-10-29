@@ -126,7 +126,9 @@ account.
 | Breakout range / candle body | 10 bars / ≥ 0.15×ATR | `AGENT_BREAKOUT_LOOKBACK`, `AGENT_BREAKOUT_BODY_ATR` |
 | Breakout RSI exhaustion | BUY ≤ 82 / SELL ≥ 18 | `AGENT_BREAKOUT_RSI_CEILING`, `AGENT_BREAKOUT_RSI_FLOOR` |
 | Spread cost | ≤ 40% of trail | `AGENT_MAX_SPREAD_TRAIL` |
-| Virtual trail | max(1.2×M1 ATR, 4 pips) | `AGENT_TRAIL_ATR`, `AGENT_TRAIL_MIN_PIPS` |
+| Initial virtual trail | max(1.2×M1 ATR, 4 pips) | `AGENT_TRAIL_ATR`, `AGENT_TRAIL_MIN_PIPS` |
+| First profit lock | Beyond entry by max(1 pip, current spread) | `AGENT_PROFIT_LOCK_MIN_PIPS` |
+| Post-lock trail | max(0.65×ATR, 1.5 pips, spread cushion), then never widens | `AGENT_PROFIT_TRAIL_ATR`, `AGENT_PROFIT_TRAIL_MIN_PIPS` |
 | Broker emergency SL | 1.5×M1 ATR, min 6 pips / 3× spread | `AGENT_EMERGENCY_SL_ATR`, `AGENT_MIN_STOP_PIPS` |
 | Broker SL update cadence / minimum move | 10 s / 2 pips | `AGENT_BROKER_STOP_UPDATE_MS`, `AGENT_BROKER_STOP_MOVE_MIN_PIPS` |
 | Max chase | 1.5×ATR | `AGENT_MAX_CHASE_ATR` |
@@ -148,15 +150,21 @@ instruments whose M1 ATR is too quiet or too wild.
 - **SELL** tracks the lowest ask; the virtual stop ratchets only downward.
 - A new M1 ATR is read at each closed M1 candle. If ATR shrinks, the stop may
   tighten; if ATR grows, the stop does not loosen.
-- TS VIRT is calculated from the best executable price and a dynamic
-  distance: `max(ATR × factor, minimum pips)`.
-- The first published TS VIRT update is held until it is already beyond entry
-  in the profitable direction. After that first profit-locking move, the stop
-  ratchets only farther into profit and never moves backwards.
-- No fixed USD activation or lock threshold is used. BUY profit lock uses a
-  stop above entry; SELL profit lock uses a stop below entry.
+- TS VIRT consumes each live tick directly, rather than waiting only for
+  the account-management timer. BUY tracks the highest executable bid and the
+  stop ratchets only upward; SELL tracks the lowest executable ask and the stop
+  ratchets only downward.
+- The first published TS VIRT update must already be beyond entry by at least
+  the configured profit buffer or the current spread, whichever is larger.
+- After the first profit lock, the trail distance switches to the tighter
+  `max(0.65×ATR, 1.5 pips, 1.1×spread)` target by default. Each favorable tick
+  can tighten TS again; the distance and stop level never move backwards.
+  When ATR refreshes or volatility expands, the active distance is never widened.
+- No fixed USD activation threshold is used. BUY profit lock requires a stop
+  above entry; SELL profit lock requires a stop below entry.
 - A BUY closes when a fresh quote has `bid ≤ TS VIRT`; a SELL closes when a
-  fresh quote has `ask ≥ TS VIRT`. Stale quotes cannot trigger a TS close.
+  fresh quote has `ask ≥ TS VIRT`. The quote is revalidated after ATR/API awaits,
+  and stale quotes cannot trigger a TS close.
 - After profit-lock activation, the agent periodically tries to move the broker
   emergency SL in the protective direction. Broker minimum-distance rules may
   reject stops that are too close; failures are written to the log.
