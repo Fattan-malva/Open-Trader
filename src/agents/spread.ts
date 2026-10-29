@@ -97,8 +97,8 @@ export function assessSpread(
     return {
       ok: false,
       reason: fx
-        ? \`spread \${value.toFixed(2)}p exceeds \${hardLimit}p cap\`
-        : \`spread \${(value * 100).toFixed(3)}% exceeds \${hardLimit}% cap\`,
+        ? `spread ${value.toFixed(2)}p exceeds ${hardLimit}p cap`
+        : `spread ${(value * 100).toFixed(3)}% exceeds ${hardLimit}% cap`,
       value,
       unit,
     };
@@ -115,7 +115,7 @@ export function assessSpread(
     if (Number.isFinite(spikeRatio) && spikeRatio > maxSpikeRatio) {
       return {
         ok: false,
-        reason: \`spread spike \${spikeRatio.toFixed(1)}x normal (limit \${maxSpikeRatio.toFixed(1)}x)\`,
+        reason: `spread spike ${spikeRatio.toFixed(1)}x normal (limit ${maxSpikeRatio.toFixed(1)}x)`,
         value,
         unit,
         baseline,
@@ -148,9 +148,9 @@ export function spreadRejectionReason(
 export function spreadLabel(symbol: string, quote: Quote): string {
   if (categorize(symbol) === "fx") {
     const pips = spreadPips(symbol, quote);
-    return \`\${pips.toFixed(1)}p\`;
+    return `${pips.toFixed(1)}p`;
   }
-  return \`\${(quote.spreadPct * 100).toFixed(1)}bp\`;
+  return `${(quote.spreadPct * 100).toFixed(1)}bp`;
 }
 
 /** 1 = tight, 0 = at the hard limit. Used to rank the prefilter shortlist. */
