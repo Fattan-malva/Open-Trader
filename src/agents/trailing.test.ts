@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { advanceVirtualStop, canMoveTrailStop, initialVirtualStop, isFreshQuote, updateBest, virtualStopLocksProfit, virtualStopHit } from "./trailing.js";
+import { advanceVirtualStop, canMoveTrailStop, initialVirtualStop, isFreshQuote, profitTrailDistanceFromAtr, updateBest, virtualStopLocksProfit, virtualStopHit } from "./trailing.js";
 
 function near(actual: number, expected: number): void {
   assert.ok(Math.abs(actual - expected) < 1e-9, `expected ${actual} to be close to ${expected}`);
@@ -66,6 +66,23 @@ test("the first TS update must already lock profit for BUY and SELL", () => {
   // SELL: a stop still above entry is not allowed as the first published update.
   assert.equal(canMoveTrailStop("sell", 1.1001, 1.1000, false), false);
   assert.equal(canMoveTrailStop("sell", 1.0999, 1.1000, false), true);
+});
+
+test("first TS profit lock requires a buffer beyond entry", () => {
+  assert.equal(canMoveTrailStop("buy", 1.1005, 1.1000, false, 0.0005), true);
+  assert.equal(canMoveTrailStop("buy", 1.1004, 1.1000, false, 0.0005), false);
+  assert.equal(canMoveTrailStop("sell", 1.0995, 1.1000, false, 0.0005), true);
+  assert.equal(canMoveTrailStop("sell", 1.0996, 1.1000, false, 0.0005), false);
+});
+
+test("post-lock trail distance tightens and never widens", () => {
+  const initialDistance = 0.0012;
+  const tightened = profitTrailDistanceFromAtr(initialDistance, 0.001, 0.65, 0.00015, 0.0001);
+  near(tightened, 0.00065);
+
+  // If ATR or spread widens later, the active distance cannot widen again.
+  const afterVolatility = profitTrailDistanceFromAtr(tightened, 0.003, 0.65, 0.00015, 0.0002);
+  near(afterVolatility, tightened);
 });
 
 test("after profit is locked, the trail may tighten further but never loosen", () => {
