@@ -36,7 +36,7 @@ export interface ManagedPosition {
   digits: number;
   pip: number;
 
-  /** distant broker-side stop; only the "program died" safety net */
+  /** Broker emergency stop; tightened after profit-lock activation when allowed. */
   emergencySl: number;
   slOrderId?: string;
 
@@ -128,8 +128,8 @@ export interface SizingResult {
 }
 
 /**
- * Fixed-fractional sizing on the virtual risk equity. Always floors to the
- * volume step so a trade can never risk more than the configured percentage.
+ * Fixed-fractional sizing on the USD-converted account risk basis. Always
+ * floors to the volume step so a trade never intentionally exceeds risk limits.
  */
 export function computeLots(input: SizingInput): SizingResult {
   if (!(input.slPips > 0) || !(input.pipValuePerLot > 0) || !(input.volumeStep > 0)) {
