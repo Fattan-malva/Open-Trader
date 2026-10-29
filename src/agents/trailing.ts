@@ -70,6 +70,16 @@ export function advanceVirtualStop(
 }
 
 /**
+ * Gross-profit threshold for starting the profit lock.
+ * Keep enough headroom above the configured lock so activation cannot
+ * immediately place the virtual stop at/above the current executable price.
+ */
+export function profitLockActivationThreshold(lockUsd: number): number {
+  const lock = Number.isFinite(lockUsd) && lockUsd > 0 ? lockUsd : 0;
+  return lock + Math.max(0.02, lock * 0.5);
+}
+
+/**
  * Close when the market trades through the virtual stop
  */
 export function virtualStopHit(
