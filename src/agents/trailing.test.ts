@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { advanceVirtualStop, initialVirtualStop, updateBest, virtualStopLocksProfit, virtualStopHit } from "./trailing.js";
+import { advanceVirtualStop, canMoveTrailStop, initialVirtualStop, updateBest, virtualStopLocksProfit, virtualStopHit } from "./trailing.js";
 
 function near(actual: number, expected: number): void {
   assert.ok(Math.abs(actual - expected) < 1e-9, `expected ${actual} to be close to ${expected}`);
@@ -56,6 +56,21 @@ test("virtual stop counts as profit protection only beyond entry", () => {
   assert.equal(virtualStopLocksProfit("sell", 1.0999, 1.1000), true);
   assert.equal(virtualStopLocksProfit("sell", 1.1000, 1.1000), false);
   assert.equal(virtualStopLocksProfit("sell", 1.1001, 1.1000), false);
+});
+
+test("the first TS update must already lock profit for BUY and SELL", () => {
+  // BUY: a stop still below entry is not allowed as the first published update.
+  assert.equal(canMoveTrailStop("buy", 1.0999, 1.1000, false), false);
+  assert.equal(canMoveTrailStop("buy", 1.1001, 1.1000, false), true);
+
+  // SELL: a stop still above entry is not allowed as the first published update.
+  assert.equal(canMoveTrailStop("sell", 1.1001, 1.1000, false), false);
+  assert.equal(canMoveTrailStop("sell", 1.0999, 1.1000, false), true);
+});
+
+test("after profit is locked, the trail may tighten further but never loosen", () => {
+  assert.equal(canMoveTrailStop("buy", 1.1020, 1.1000, true), true);
+  assert.equal(canMoveTrailStop("sell", 1.0980, 1.1000, true), true);
 });
 
 test("virtual stop hit uses executable side of the quote", () => {
