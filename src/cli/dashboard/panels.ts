@@ -371,13 +371,18 @@ export function renderPositionsTable(
     if (index >= 2) align[index] = "right";
   });
 
+  // Pad baris sampai `limit` supaya tinggi panel konstan, berapa pun jumlah
+  // posisi yang terbuka. Ini yang menghilangkan "kedip" pada border panel.
+  const blankRow = headers.map(() => "");
+  while (rows.length < limit) rows.push(blankRow);
+
   const header = table(headers, rows, { align, indent: "  " });
   const total = enriched.length;
-  if (total > limit) {
-    const end = Math.min(start + limit, total);
-    return `${header}\n${style.dim(`  [${start + 1}-${end}/${total}] scroll ↑↓`)}`;
-  }
-  return header;
+  const end = Math.min(start + limit, total);
+  const footer = total > limit
+    ? `  [${start + 1}-${end}/${total}] scroll ↑↓`
+    : `  [${start + 1}-${end}/${total}]`;
+  return `${header}\n${style.dim(footer)}`;
 }
 
 export function renderOrdersTable(
@@ -423,27 +428,39 @@ export interface HistoryEntry {
 
 /**
  * Closed-trade history sorted by largest P/L, laid out in as many side-by-side
- * tables as the width allows (up to five). Scrolls with its own offset.
+ * tables as the width allows — up to SIX columns. When the natural width would
+ * only fit 5, each column is squeezed down to MIN_COLUMN_WIDTH so six still fit.
  */
 export function renderHistoryTable(
   history: HistoryEntry[] | undefined,
-  rows = 4,
+  rows = 6,
   width = 60,
   scrollOffset = 0,
 ): string {
   if (!history || history.length === 0) return style.dim("  belum ada history close");
 
   const sorted = [...history].sort((a, b) => b.pnl - a.pnl);
-  // Size each mini-table from the real data so nothing is ever truncated.
   const sample = sorted.slice(0, 200);
   const symbolWidth = Math.max(6, ...sample.map((entry) => entry.symbol.length));
   const pnlWidth = Math.max(5, ...sample.map((entry) => `$${entry.pnl.toFixed(2)}`.length));
-  const columnWidth = 2 + symbolWidth + 2 + pnlWidth;
+  const preferredColumnWidth = 2 + symbolWidth + 2 + pnlWidth;
   const gap = 1;
-  const columns = Math.max(
+
+  const MAX_HISTORY_COLUMNS = 5;
+  const MIN_COLUMN_WIDTH = 11;
+  let columns = Math.max(
     1,
-    Math.min(5, Math.floor((width + gap) / (columnWidth + gap))),
+    Math.min(MAX_HISTORY_COLUMNS, Math.floor((width + gap) / (preferredColumnWidth + gap))),
   );
+  let columnWidth = preferredColumnWidth;
+  if (columns < MAX_HISTORY_COLUMNS) {
+    const squeezed = Math.floor((width - gap * (MAX_HISTORY_COLUMNS - 1)) / MAX_HISTORY_COLUMNS);
+    if (squeezed >= MIN_COLUMN_WIDTH) {
+      columns = MAX_HISTORY_COLUMNS;
+      columnWidth = squeezed;
+    }
+  }
+
   const perCol = Math.max(1, rows);
   const perPage = perCol * columns;
   const start = Math.max(0, Math.min(scrollOffset, Math.max(0, sorted.length - 1)));
@@ -457,7 +474,11 @@ export function renderHistoryTable(
     ]);
     const tableLines = table(headers, body, { align: { 1: "right" }, indent: "  " })
       .split("\n")
-      .map((line) => pad(line, columnWidth));
+      .map((line) => {
+        // Truncate kalau baris lebih lebar dari kolom (supaya kolom tidak overlap).
+        const clipped = visibleLength(line) > columnWidth ? cutAnsi(line, columnWidth) : line;
+        return pad(clipped, columnWidth);
+      });
     const expected = perCol + 2;
     while (tableLines.length < expected) tableLines.push(" ".repeat(columnWidth));
     return tableLines.slice(0, expected);
@@ -472,11 +493,8 @@ export function renderHistoryTable(
   }
 
   const end = Math.min(start + perPage, sorted.length);
-  const footer =
-    sorted.length > perPage
-      ? style.dim(`  [${start + 1}-${end}/${sorted.length}] · PgUp/PgDn scroll history`)
-      : "";
-  return footer ? `${grid.join("\n")}\n${footer}` : grid.join("\n");
+  const footer = `  [${start + 1}-${end}/${sorted.length}] · PgUp/PgDn scroll history`;
+  return `${grid.join("\n")}\n${style.dim(footer)}`;
 }
 
 // --------------------------------------------------------------------- risk
@@ -484,8 +502,6 @@ export function renderHistoryTable(
 export function spreadSpikes(ticks: TickHub): number {
   const quotes = ticks.store.all();
   if (quotes.length < 5) return 0;
-  // Absolute threshold (5 bp) instead of a median multiple: exotic pairs are
-  // structurally wide, so a relative measure would flag them permanently.
   return quotes.filter((quote) => Number.isFinite(quote.spreadPct) && quote.spreadPct >= 0.05)
     .length;
 }
@@ -728,17 +744,17 @@ function agentPanelLines(agent: AgentStateFile | null | undefined): string[] {
 
   const lines = [
     `${agent.running ? style.green("● running") : style.dim("○ idle")} · ` +
-      `${agent.mode === "live" ? style.green("LIVE") : style.yellow("DRY-RUN")} · ` +
-      `${agent.universe ?? 0} pairs · ${agent.screener?.pass ?? candidates.length} kandidat`,
+    `${agent.mode === "live" ? style.green("LIVE") : style.yellow("DRY-RUN")} · ` +
+    `${agent.universe ?? 0} pairs · ${agent.screener?.pass ?? candidates.length} kandidat`,
     stats && stats.trades
       ? `trades ${stats.trades} · win ${winRate.toFixed(1)}% ` +
-        `(${stats.wins ?? 0}W/${stats.losses ?? 0}L) · net ${formatSignedMoney(stats.netProfit ?? 0)}`
+      `(${stats.wins ?? 0}W/${stats.losses ?? 0}L) · net ${formatSignedMoney(stats.netProfit ?? 0)}`
       : style.dim("belum ada trade tertutup"),
     `daily ${formatSignedMoney(agent.dailyPnl ?? 0)} · open ${open.length} · ` +
-      `scan ${agent.updatedAt ? formatAge(Date.now() - agent.updatedAt) : "—"} lalu`,
+    `scan ${agent.updatedAt ? formatAge(Date.now() - agent.updatedAt) : "—"} lalu`,
     signal
       ? `last ${gateSide(signal.side)} ${signal.symbol ?? "?"} · ${signal.lot ?? 0} lot · ` +
-        `entry ${signal.entry ?? "—"} · SL ${signal.sl ?? "—"}`
+      `entry ${signal.entry ?? "—"} · SL ${signal.sl ?? "—"}`
       : style.dim("belum ada sinyal entry"),
     trailing.length > 0
       ? `virtual ${trailing.map((entry) => `${entry.symbol ?? "?"}→${entry.sl ?? "?"}`).join(" ")}`
@@ -811,8 +827,6 @@ function lastAgentActivity(
 /** Recent log lines for one agent role, shown under its own card. */
 function conciseAgentMessage(entry: AgentActivity): string {
   const message = entry.message.replace(/\s+/g, " ").trim();
-  // ENTRY logs are diagnostic records: preserve the full reject reason and
-  // sizing details rather than reducing them to "REJECT XAUUSD".
   if (entry.agent === "entry") return message;
   const symbol = message.match(/\b([A-Z][A-Z0-9._-]{2,})\b/g)?.find((token) =>
     !["CLOSE", "OPEN", "TS", "SL", "TRAIL", "ERROR", "ERR", "SKIP", "SCAN", "ENTRY", "BUY", "SELL", "PASS", "NO", "SIGNAL", "PROTECT", "ADOPT", "VIRTUAL", "HIT"].includes(token),
@@ -821,7 +835,6 @@ function conciseAgentMessage(entry: AgentActivity): string {
   if (entry.agent === "trader") {
     const pnl = message.match(/net (-?\d+(?:\.\d+)?) USD/i);
     if (/close|closed|net /i.test(message) && pnl) {
-      // Always retain the instrument on close events; the P/L is realized later.
       return `CLOSE ${symbol ?? "?"} ${Number(pnl[1]) >= 0 ? "+" : ""}${Number(pnl[1]).toFixed(2)}`;
     }
     const lock = message.match(/profit-lock activated.*?\+?([0-9.]+) USD/i);
@@ -856,7 +869,6 @@ function conciseAgentMessage(entry: AgentActivity): string {
     if (/error|failed/i.test(message)) return `SCAN ERR ${symbol ?? ""}`.trim();
   }
 
-  // Let panel.fitLine truncate against the actual available inner width, right before the border.
   return message;
 }
 
@@ -906,32 +918,49 @@ function agentMessageStyle(entry: AgentActivity, message: string): string {
           : style.dim(message);
 }
 
-/** Recent log lines for one agent role, shown under its own card. */
+/**
+ * Recent log lines for one agent role. Uses a ROW BUDGET (`maxLines`) instead
+ * of a fixed entry count: we walk entries from newest → oldest, so the latest
+ * activity is always visible at the bottom and old lines "scroll off" the top
+ * even though the panel height is fixed.
+ */
 function agentLogLines(
   agent: AgentStateFile | null | undefined,
   role: AgentRole,
-  limit = 4,
+  maxLines: number,
   panelInnerWidth?: number,
 ): string[] {
   const entries = (agent?.activity ?? []).filter((entry) => entry.agent === role);
   if (entries.length === 0) return [style.dim("· belum ada log")];
-  return entries.slice(-limit).flatMap((entry) => {
+
+  const collected: string[] = [];
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    const entry = entries[i]!;
     const message = conciseAgentMessage(entry);
+    let entryLines: string[];
     if (role === "entry" && panelInnerWidth !== undefined) {
-      // The first line carries HH:MM:SS; follow-up lines align under the
-      // message with a continuation marker. No ellipsis/truncation is used.
       const messageWidth = Math.max(8, panelInnerWidth - 11);
-      const wrapped = wrapPlainText(message, messageWidth);
-      return wrapped.map((part, index) => index === 0
+      const wrapped = wrapPlainText(message, messageWidth).slice(0, 2);
+      entryLines = wrapped.map((part, index) => index === 0
         ? `${style.dim(shortClock(entry.at))} ${agentMessageStyle(entry, part)}`
         : `${" ".repeat(9)}${style.dim("↳ ")}${agentMessageStyle(entry, part)}`);
+    } else {
+      entryLines = [`${style.dim(shortClock(entry.at))} ${agentMessageStyle(entry, message)}`];
     }
-    return [`${style.dim(shortClock(entry.at))} ${agentMessageStyle(entry, message)}`];
-  });
+    if (collected.length + entryLines.length > maxLines) {
+      const space = maxLines - collected.length;
+      if (space > 0) collected.unshift(...entryLines.slice(-space));
+      break;
+    }
+    collected.unshift(...entryLines);
+  }
+  return collected.length > 0 ? collected : [style.dim("· belum ada log")];
 }
 
 function withLog(title: string, lines: string[], log: string[]): string[] {
-  return [...lines, style.dim("─".repeat(Math.max(4, title.length))) , ...log];
+  // Panjang garis pemisah memakai judul (konstan: SCREENER/ENTRY/TRADER),
+  // sehingga tidak "kedip" saat isi berubah.
+  return [...lines, style.dim("─".repeat(Math.max(4, title.length))), ...log];
 }
 
 function screenerPanelLines(agent: AgentStateFile | null | undefined, logLimit = 4): string[] {
@@ -960,7 +989,11 @@ function screenerPanelLines(agent: AgentStateFile | null | undefined, logLimit =
   return withLog("SCREENER", head, agentLogLines(agent, "screener", logLimit));
 }
 
-function entryPanelLines(agent: AgentStateFile | null | undefined, width: number): string[] {
+function entryPanelLines(
+  agent: AgentStateFile | null | undefined,
+  width: number,
+  logLimit: number,
+): string[] {
   if (!agent) {
     return [
       style.dim("menunggu sinyal"),
@@ -980,7 +1013,7 @@ function entryPanelLines(agent: AgentStateFile | null | undefined, width: number
       ? `entry ${signal.entry ?? "—"} · SL ${signal.sl ?? "—"} · trail ${signal.trail ?? "—"}`
       : style.dim(`${timeframes?.confirm ?? "M1"} close → entry → risk`),
   ];
-  return withLog("ENTRY", head, agentLogLines(agent, "entry", 4, Math.max(8, width - 4)));
+  return withLog("ENTRY", head, agentLogLines(agent, "entry", logLimit, Math.max(8, width - 4)));
 }
 
 function traderPanelLines(agent: AgentStateFile | null | undefined, logLimit = 4): string[] {
@@ -999,26 +1032,20 @@ function traderPanelLines(agent: AgentStateFile | null | undefined, logLimit = 4
   const head = [
     `${agentMode(agent)} · ${open.length} managed · ${trailing} virtual`,
     `${stats?.trades ?? 0} trades · win ${decided > 0 ? `${winRate.toFixed(1)}%` : "—"} · ` +
-      `${stats?.wins ?? 0}W/${stats?.losses ?? 0}L`,
+    `${stats?.wins ?? 0}W/${stats?.losses ?? 0}L`,
     `net ${formatSignedMoney(stats?.netProfit ?? 0)} · daily ${formatSignedMoney(agent.dailyPnl ?? 0)}`,
   ];
   return withLog("TRADER", head, agentLogLines(agent, "trader", logLimit));
 }
 
-// Keep the agent cards at the tallest height reached during this dashboard
-// session. ENTRY log reasons can wrap across many rows; the other cards should
-// grow with it, and none of the three should collapse again when logs get shorter.
-let retainedAgentPanelContentHeight = 0;
+// FIXED height for the three agent cards. The panel is padded/truncated to
+// exactly this many content rows so it never grows or shrinks at runtime.
+const AGENT_PANEL_CONTENT_HEIGHT = 10;
 
-function equalizeAgentPanelLines(lines: string[][]): string[][] {
-  retainedAgentPanelContentHeight = Math.max(
-    retainedAgentPanelContentHeight,
-    ...lines.map((entry) => entry.length),
-  );
-  return lines.map((entry) => [
-    ...entry,
-    ...Array.from({ length: retainedAgentPanelContentHeight - entry.length }, () => ""),
-  ]);
+function fitAgentLines(lines: string[], height: number): string[] {
+  const out = lines.slice(0, height);
+  while (out.length < height) out.push("");
+  return out;
 }
 
 export function renderAgentContainers(
@@ -1026,60 +1053,55 @@ export function renderAgentContainers(
   width: number,
 ): string {
   const status = agent?.running ? "live" : "idle";
-  const renderCards = (screenerWidth: number, entryWidth: number, traderWidth: number): string => {
-    const entry = entryPanelLines(agent, entryWidth);
-    // Set the retained panel height using ENTRY's full wrapped diagnostics and
-    // the baseline header/log rows. Use the remaining rows for as many recent
-    // SCREENER/TRADER records as are available, rather than a fixed four each.
-    const baseline = [
-      screenerPanelLines(agent, 1),
-      entry,
-      traderPanelLines(agent, 1),
-    ];
-    retainedAgentPanelContentHeight = Math.max(
-      retainedAgentPanelContentHeight,
-      ...baseline.map((lines) => lines.length),
-    );
-    const logRows = Math.max(1, retainedAgentPanelContentHeight - 4);
-    const [screenerLines, entryLines, traderLines] = equalizeAgentPanelLines([
-      screenerPanelLines(agent, logRows),
-      entry,
-      traderPanelLines(agent, logRows),
-    ]);
-    return row(
-      [
-        panel(`SCREENER · ${status}`, screenerLines!, screenerWidth, "cyan"),
-        panel(`ENTRY · ${status}`, entryLines!, entryWidth, "green"),
-        panel(`TRADER · ${status}`, traderLines!, traderWidth, "yellow"),
-      ],
-      " ",
-    );
-  };
+  // 3 baris header + 1 separator + (AGENT_PANEL_CONTENT_HEIGHT - 4) baris log.
+  const logRows = Math.max(1, AGENT_PANEL_CONTENT_HEIGHT - 4);
 
   if (width >= 96) {
     const widths = splitWidths(width, 3, 1);
-    return renderCards(widths[0]!, widths[1]!, widths[2]!);
+    return row(
+      [
+        panel(
+          `SCREENER · ${status}`,
+          fitAgentLines(screenerPanelLines(agent, logRows), AGENT_PANEL_CONTENT_HEIGHT),
+          widths[0]!,
+          "cyan",
+        ),
+        panel(
+          `ENTRY · ${status}`,
+          fitAgentLines(entryPanelLines(agent, widths[1]!, logRows), AGENT_PANEL_CONTENT_HEIGHT),
+          widths[1]!,
+          "green",
+        ),
+        panel(
+          `TRADER · ${status}`,
+          fitAgentLines(traderPanelLines(agent, logRows), AGENT_PANEL_CONTENT_HEIGHT),
+          widths[2]!,
+          "yellow",
+        ),
+      ],
+      " ",
+    );
   }
 
-  // Stacked layout still shares the same height high-water mark, while each
-  // card keeps its own width and receives the full available log rows.
-  const entry = entryPanelLines(agent, width);
-  retainedAgentPanelContentHeight = Math.max(
-    retainedAgentPanelContentHeight,
-    entry.length,
-    screenerPanelLines(agent, 1).length,
-    traderPanelLines(agent, 1).length,
-  );
-  const logRows = Math.max(1, retainedAgentPanelContentHeight - 4);
-  const [screenerLines, entryLines, traderLines] = equalizeAgentPanelLines([
-    screenerPanelLines(agent, logRows),
-    entry,
-    traderPanelLines(agent, logRows),
-  ]);
   return [
-    panel(`SCREENER · ${status}`, screenerLines!, width, "cyan"),
-    panel(`ENTRY · ${status}`, entryLines!, width, "green"),
-    panel(`TRADER · ${status}`, traderLines!, width, "yellow"),
+    panel(
+      `SCREENER · ${status}`,
+      fitAgentLines(screenerPanelLines(agent, logRows), AGENT_PANEL_CONTENT_HEIGHT),
+      width,
+      "cyan",
+    ),
+    panel(
+      `ENTRY · ${status}`,
+      fitAgentLines(entryPanelLines(agent, width, logRows), AGENT_PANEL_CONTENT_HEIGHT),
+      width,
+      "green",
+    ),
+    panel(
+      `TRADER · ${status}`,
+      fitAgentLines(traderPanelLines(agent, logRows), AGENT_PANEL_CONTENT_HEIGHT),
+      width,
+      "yellow",
+    ),
   ].join("\n");
 }
 
@@ -1093,7 +1115,6 @@ export function renderAgentLogLines(
   }
   const lines = activity.map((entry) => {
     const message = conciseAgentMessage(entry);
-    // Closed P/L color follows the realized amount, not the generic log tone.
     const closePnl = entry.agent === "trader"
       ? message.match(/^CLOSE\s+\S+\s+([+-]?\d+(?:\.\d+)?)$/i)
       : null;
@@ -1133,14 +1154,12 @@ export function accountPanelLines(state: DashboardState): string[] {
     `used ${formatCompactMoney(view.usedMargin)} · lvl ${level}`,
     `today ${formatSignedMoney(stats.change, view.currency)} (${formatSignedPct(stats.changePct)})`,
     `unreal ${formatSignedMoney(view.unrealized, view.currency)} · ` +
-      `${view.positions.length} pos · ${view.orders.length} ord`,
+    `${view.positions.length} pos · ${view.orders.length} ord`,
   ];
 }
 
 export function marketPanelLines(ticks: TickHub): string[] {
   const quotes = ticks.store.all().filter((quote) => Number.isFinite(quote.mid) && quote.mid > 0);
-  // A first tick has firstMid === mid, so every symbol looks like a 0.00%
-  // mover. Only rank instruments that have actually changed at least once.
   const movers = quotes
     .filter((quote) => quote.ticks > 1)
     .sort((a, b) => Math.abs(changePct(b)) - Math.abs(changePct(a)))
@@ -1192,9 +1211,9 @@ export function renderDashboardFooter(
   const scroll =
     options.scroll && options.scroll.total > options.scroll.visible
       ? `  ${options.scroll.offset + 1}-${Math.min(
-          options.scroll.offset + options.scroll.visible,
-          options.scroll.total,
-        )}/${options.scroll.total}`
+        options.scroll.offset + options.scroll.visible,
+        options.scroll.total,
+      )}/${options.scroll.total}`
       : "";
   return cutAnsi(`${style.dim(keys)}${style.dim(scroll)}`, width);
 }
@@ -1264,8 +1283,6 @@ function stack(blocks: string[]): string {
 }
 
 export function renderDashboard(state: DashboardState, layout: DashboardLayout): string {
-  // Respect the actual terminal width; forcing 100 columns can make rows overflow
-  // 90–99 column terminals and push the lower dashboard content out of view.
   const width = Math.max(90, layout.width);
   const height = Math.max(24, layout.height);
   const inner = width - 4;
@@ -1289,8 +1306,8 @@ export function renderDashboard(state: DashboardState, layout: DashboardLayout):
       spreadLine(
         `${mode} · ${view.status} · ${view.executionMode} · 1:${view.leverage} · ${view.currency}`,
         `${style.dim("ticks")} ${dot(state.connection.ticksState)} ${state.ticks.ticksPerSecond}/s · ` +
-          `${style.dim("events")} ${dot(state.connection.eventsState)} · ` +
-          `${state.ticks.quotesCount} live/${state.ticks.subscribed.length} ws`,
+        `${style.dim("events")} ${dot(state.connection.eventsState)} · ` +
+        `${state.ticks.quotesCount} live/${state.ticks.subscribed.length} ws`,
         inner,
       ),
     ],
@@ -1298,7 +1315,7 @@ export function renderDashboard(state: DashboardState, layout: DashboardLayout):
     view.isDemo ? "yellow" : "green",
   );
 
-  // ------------------------------------------------- agent row (own logs)
+  // ------------------------------------------------- agent row (fixed height)
   const agentBlock = state.showAgent ? renderAgentContainers(state.agent, width) : "";
 
   // ---------------------------------------------------- side-by-side columns
@@ -1358,86 +1375,68 @@ export function renderDashboard(state: DashboardState, layout: DashboardLayout):
   );
 
   // ------------------------------------------------ layout budget
-  // ENTRY diagnostics may wrap to multiple rows. Reserve their actual height
-  // so the remaining dashboard layout adapts rather than clipping the log.
   const bottomRows = height >= 44 ? 5 : height >= 40 ? 4 : 3;
-  const bottomPanelH = bottomRows + 2;
+  const eventsPanelHeight = bottomRows + 2; // 2 border
+  const historyRows = 6; // compact: 6 entries per column, up to 6 columns
   const reservedRows = header.split("\n").length + (agentBlock ? agentBlock.split("\n").length : 0) + 1;
   const mainHeight = Math.max(10, height - reservedRows);
 
-  // Left column: KPI cards + P&L chart + account + history (below account, same width)
-  const leftBaseBlocks = [kpi];
-  let used = kpi.split("\n").length;
+  // ---------------------------------------------------------- left column
+  const topBlocks = [kpi];
+  const bottomBlocks: string[] = [];
+  if (state.showCharts) {
+    const pnlPoints: ChartPoint[] = equity
+      .points()
+      .filter((point) => Number.isFinite(point.t) && Number.isFinite(point.value));
+    const chartLines = pixelPnlChart(pnlPoints, {
+      width: leftWidth - 2,
+      height: Math.max(4, Math.min(6, mainHeight - 24)),
+      currency: view.currency,
+      title: "PNL TODAY",
+    }).split("\n");
+    bottomBlocks.push(panel("P&L · today", chartLines, leftWidth, "blue", true));
+  }
   const accountH = 6;
-  const canAccount = mainHeight >= used + accountH + bottomPanelH + 3;
-  const chartHeight = Math.max(
-    4,
-    Math.min(
-      6,
-      mainHeight - used - (canAccount ? accountH : 0) - bottomPanelH - 8,
+  const canAccount = mainHeight >= kpi.split("\n").length + accountH + eventsPanelHeight + 3;
+  if (canAccount) bottomBlocks.push(accountBlock);
+  bottomBlocks.push(
+    panel(
+      `HISTORY · ${state.history?.length ?? 0} close · sort P&L$ · PgUp/PgDn`,
+      renderHistoryTable(state.history, historyRows, leftWidth - 4, state.histScroll ?? 0).split("\n"),
+      leftWidth,
+      "gray",
     ),
   );
 
-  let chartStart = "";
-  if (state.showCharts && chartHeight >= 4) {
-    const pnlPoints: ChartPoint[] = equity
-      .points()
-      .filter((point) => Number.isFinite(point.t) && Number.isFinite(point.value));
-    const chartLines = pixelPnlChart(pnlPoints, {
-      width: leftWidth - 2,
-      height: chartHeight,
-      currency: view.currency,
-      title: "PNL TODAY",
-    }).split("\n");
-    chartStart = panel("P&L · today", chartLines, leftWidth, "blue", true);
-    leftBaseBlocks.push(chartStart);
-  } else if (state.showCharts) {
-    const pnlPoints: ChartPoint[] = equity
-      .points()
-      .filter((point) => Number.isFinite(point.t) && Number.isFinite(point.value));
-    const chartLines = pixelPnlChart(pnlPoints, {
-      width: leftWidth - 2,
-      height: 4,
-      currency: view.currency,
-      title: "PNL TODAY",
-    }).split("\n");
-    chartStart = panel("P&L · today", chartLines, leftWidth, "blue", true);
-    leftBaseBlocks.push(chartStart);
-  }
-  if (canAccount) leftBaseBlocks.push(accountBlock);
+  const topHeight = kpi.split("\n").length;
+  const bottomHeight = bottomBlocks.reduce((sum, block) => sum + block.split("\n").length, 0);
+  const spacerHeight = Math.max(0, mainHeight - topHeight - bottomHeight);
+  const spacer = spacerHeight > 0
+    ? Array.from({ length: spacerHeight }, () => " ".repeat(leftWidth)).join("\n")
+    : "";
 
-  const historyBlockLeft = panel(
-    `HISTORY · ${state.history?.length ?? 0} close · sort P&L$ · PgUp/PgDn`,
-    renderHistoryTable(state.history, bottomRows, leftWidth - 4, state.histScroll ?? 0).split("\n"),
-    leftWidth,
-    "gray",
-  );
-  leftBaseBlocks.push(historyBlockLeft);
-
-  let leftColumn = stack(leftBaseBlocks);
+  // History menempel ke dasar kolom kiri (sejajar dengan events di kanan).
+  let leftColumn = [kpi, spacer, ...bottomBlocks].filter((block) => block.length > 0).join("\n");
   let leftHeight = leftColumn.split("\n").length;
-  // Pad or trim to the agreed main height so both columns stay aligned.
-  if (leftHeight < mainHeight) {
-    leftColumn += `\n${Array.from({ length: mainHeight - leftHeight }, () => " ".repeat(leftWidth)).join("\n")}`;
-    leftHeight = mainHeight;
-  } else if (leftHeight > mainHeight) {
-    leftColumn = leftColumn.split("\n").slice(0, mainHeight).join("\n");
+  if (leftHeight > mainHeight) {
+    // Trim dari ATAS (KPI tetap, history tetap di dasar) jika kepanjangan.
+    leftColumn = leftColumn.split("\n").slice(-mainHeight).join("\n");
     leftHeight = mainHeight;
   }
 
-  // Order rows, then positions fill the rest and events take bottom height
+  // ---------------------------------------------------------- right column
   const ordersRows = state.showOrders
     ? Math.max(2, Math.min(5, Math.floor(mainHeight / 7)))
     : 0;
   const ordersBlock = state.showOrders
     ? panel(
-        `ORDERS · ${view.orders.length} SL`,
-        renderOrdersTable(view, ordersRows, rightWidth).split("\n"),
-        rightWidth,
-        "cyan",
-      )
+      `ORDERS · ${view.orders.length} SL`,
+      renderOrdersTable(view, ordersRows, rightWidth).split("\n"),
+      rightWidth,
+      "cyan",
+    )
     : "";
-  const ordersHeight = ordersBlock ? ordersBlock.split("\n").length : 0;
+  const ordersPanelHeight = ordersBlock ? ordersBlock.split("\n").length : 0;
 
   const buildPositions = (rows: number): { block: string; height: number } => {
     const block = panel(
@@ -1456,10 +1455,12 @@ export function renderDashboard(state: DashboardState, layout: DashboardLayout):
     return { block, height: block.split("\n").length };
   };
 
-  let posRows = Math.max(3, leftHeight - ordersHeight - bottomPanelH - 2);
+  // Positions: 5 rows chrome (2 border + 2 header tabel + 1 footer). Events
+  // must sit at the bottom regardless of whether orders are shown.
+  let posRows = Math.max(3, mainHeight - ordersPanelHeight - eventsPanelHeight - 5);
   let positions = buildPositions(posRows);
   while (
-    leftHeight - positions.height - ordersHeight - 2 < bottomPanelH &&
+    positions.height + ordersPanelHeight + eventsPanelHeight > mainHeight &&
     posRows > 3
   ) {
     posRows -= 1;
@@ -1468,10 +1469,10 @@ export function renderDashboard(state: DashboardState, layout: DashboardLayout):
 
   const eventsBlock = state.showEvents
     ? (() => {
-        const lines = renderEventLines(state.events, bottomRows).split("\n");
-        while (lines.length < bottomRows) lines.push("");
-        return panel(`EVENTS · ${state.events.length}`, lines, rightWidth, "gray");
-      })()
+      const lines = renderEventLines(state.events, bottomRows).split("\n");
+      while (lines.length < bottomRows) lines.push("");
+      return panel(`EVENTS · ${state.events.length}`, lines, rightWidth, "gray");
+    })()
     : "";
 
   const rightColumn = stack([positions.block, ordersBlock, eventsBlock].filter(Boolean));
