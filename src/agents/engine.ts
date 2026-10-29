@@ -6,7 +6,7 @@ import type { Tools } from "../tools/index.js";
 import type { TradeTools } from "../tools/trading.js";
 import type { EventHub, TickHub } from "../runtime/hubs.js";
 import type { AccountView, SnapshotCache } from "../runtime/snapshot.js";
-import { dropFormingCandle, type NormalizedCandle } from "../market/candles.js";
+import { dropFormingCandle, pipSize, type NormalizedCandle } from "../market/candles.js";
 import { timeframeMs } from "../market/timeframes.js";
 import type { EquityTracker } from "../monitor/equity.js";
 import type { AgentConfig } from "./config.js";
@@ -15,6 +15,7 @@ import type { AgentActivity, AgentJournal, AgentRole, AgentTone } from "./journa
 import type { Candidate, ScanDiagnostics } from "./screener.js";
 import { Screener, screenerOptionsFrom } from "./screener.js";
 import type { ExecutorState, RealizedStats, RiskExecutor, TradeLogEntry } from "./risk-and-executor.js";
+import { shouldOpenReentry, type EntryTriggerState } from "./reentry.js";
 
 const SCAN_GRACE_MS = 2_000;
 
@@ -83,6 +84,8 @@ export interface AgentStateFile {
   /** Per-agent activity feed for the dashboard containers. */
   activity?: AgentActivity[];
   tradeLog: TradeLogEntry[];
+  /** Recent successful entry triggers, persisted to avoid duplicate tick-level entries after restarts. */
+  entryTriggers?: EntryTriggerState[];
   /** Full executor state (managed positions with SL/trail metadata) for restarts. */
   executor: ExecutorState;
 }
@@ -127,6 +130,8 @@ export class AgentEngine {
   private lastFeedRestartAt = 0;
   private manageBackoffUntil = 0;
   private lastManageErrorAt = 0;
+  private readonly entryTriggers = new Map<string, EntryTriggerState>();
+  private readonly entryRetryAt = new Map<string, number>();
 
   constructor(private readonly deps: EngineDeps) {
     this.screener = new Screener(deps.tools, deps.ticks, screenerOptionsFrom(deps.config));
@@ -152,6 +157,36 @@ export class AgentEngine {
       const raw = JSON.parse(fs.readFileSync(this.stateFile, "utf8")) as AgentStateFile;
       this.deps.executor.restore(raw.executor);
       this.journal.restore(raw.activity);
+      if (Array.isArray(raw.entryTriggers)) {
+        for (const trigger of raw.entryTriggers.slice(-500)) {
+          if (
+            trigger &&
+            typeof trigger.symbol === "string" &&
+            (trigger.side === "buy" || trigger.side === "sell") &&
+            typeof trigger.candleTime === "string" &&
+            Number.isFinite(trigger.price) &&
+            trigger.price > 0 &&
+            Number.isFinite(trigger.at)
+          ) {
+            this.entryTriggers.set(`${trigger.symbol}:${trigger.side}`, trigger);
+          }
+        }
+      } else {
+        // Older state files did not persist trigger watermarks. Seed from
+        // current managed positions to avoid immediate duplicate entries.
+        for (const position of this.deps.executor.managed.values()) {
+          const trigger: EntryTriggerState = {
+            symbol: position.symbol,
+            side: position.side,
+            candleTime: "",
+            price: position.entry,
+            at: position.openedAt,
+          };
+          const key = `${trigger.symbol}:${trigger.side}`;
+          const previous = this.entryTriggers.get(key);
+          if (!previous || previous.at < trigger.at) this.entryTriggers.set(key, trigger);
+        }
+      }
     } catch {
       // first run
     }
@@ -167,6 +202,7 @@ export class AgentEngine {
     this.record(
       "screener",
       `agent ${this.deps.live ? "LIVE" : "DRY-RUN"} · ${this.deps.universe.length} pairs · ` +
+        `scan ${this.deps.config.alignScanToCandle ? "candle-aligned" : `${this.deps.config.scanIntervalMs}ms`} · ` +
         `screener ${this.deps.config.screenerTimeframe} · trend ${this.deps.config.trendTimeframe} · ` +
         `confirm ${this.deps.config.confirmTimeframe} · trail ${this.deps.config.trailTimeframe} · ` +
         `risk ${this.deps.config.riskPct}% of live account equity · ` +
@@ -325,8 +361,17 @@ export class AgentEngine {
       this.record(
         "screener",
         `fresh ${diagnostics.fresh}/${diagnostics.withQuote} · prefilter ${diagnostics.prefiltered} · ` +
-          `shortlist ${diagnostics.shortlist} · candle fail ${diagnostics.candleFails} · spread reject ${diagnostics.spreadRejected} (${diagnostics.spreadSpikeRejected} spikes) · pass ${diagnostics.passed}`,
+          `shortlist ${diagnostics.shortlist} · cache pending ${diagnostics.cachePending} · cache errors ${diagnostics.cacheFailures} · ` +
+          `spread reject ${diagnostics.spreadRejected} (${diagnostics.spreadSpikeRejected} spikes) · pass ${diagnostics.passed}`,
       );
+      const rejectionSummary = Object.entries(diagnostics.scoreRejects)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([reason, count]) => `${reason} ${count}`)
+        .join(" · ");
+      if (rejectionSummary) {
+        this.record("screener", `screen rejects ${rejectionSummary}`, "warn");
+      }
       if (diagnostics.top.length > 0) {
         this.record(
           "screener",
@@ -355,6 +400,7 @@ export class AgentEngine {
       // last closed confirmation candle; there is no M5 step and no TP.
       const tried: string[] = [];
       const entered: string[] = [];
+      let triggerSuppressed = 0;
       for (const candidate of candidates) {
         if (this.stopped) return;
         const quote = this.deps.ticks.get(candidate.symbol);
@@ -380,6 +426,24 @@ export class AgentEngine {
           continue;
         }
 
+        const triggerKey = `${candidate.symbol}:${decision.signal.side}`;
+        const candleTime = candidate.candles[candidate.candles.length - 1]?.time ?? "";
+        const triggerPrice = decision.signal.entry;
+        const previousTrigger = this.entryTriggers.get(triggerKey);
+        const reentryAllowed = shouldOpenReentry({
+          side: decision.signal.side,
+          candleTime,
+          price: triggerPrice,
+          atr: decision.signal.atr,
+          stepAtr: this.deps.config.reentryStepAtr,
+          minimumStep: this.deps.config.reentryMinPips * decision.signal.pip,
+          previous: previousTrigger,
+        });
+        if (!reentryAllowed || (this.entryRetryAt.get(triggerKey) ?? 0) > Date.now()) {
+          triggerSuppressed += 1;
+          continue;
+        }
+
         this.lastSignal = decision.signal;
         this.record(
           "entry",
@@ -391,6 +455,13 @@ export class AgentEngine {
         );
 
         if (!this.deps.live) {
+          this.entryTriggers.set(triggerKey, {
+            symbol: candidate.symbol,
+            side: decision.signal.side,
+            candleTime,
+            price: triggerPrice,
+            at: Date.now(),
+          });
           entered.push(`${candidate.symbol} (dry)`);
           continue;
         }
@@ -407,6 +478,14 @@ export class AgentEngine {
             slPips: Math.abs(opened.managed.entry - opened.managed.emergencySl) / opened.managed.pip,
             lot: opened.managed.volume,
           };
+          this.entryTriggers.set(triggerKey, {
+            symbol: opened.managed.symbol,
+            side: decision.signal.side,
+            candleTime,
+            price: opened.managed.entry,
+            at: opened.managed.openedAt,
+          });
+          this.entryRetryAt.delete(triggerKey);
           entered.push(`${opened.managed.symbol} ${opened.managed.volume} lot`);
           this.record(
             "entry",
@@ -417,6 +496,7 @@ export class AgentEngine {
           );
           continue;
         }
+        this.entryRetryAt.set(triggerKey, Date.now() + 3_000);
         this.record(
           "entry",
           `open ditolak ${candidate.symbol}: ${opened.reason ?? "?"}`,
@@ -425,6 +505,12 @@ export class AgentEngine {
         tried.push(`${candidate.symbol}: ${opened.reason ?? "rejected"}`);
       }
 
+      if (triggerSuppressed > 0) {
+        this.record(
+          "entry",
+          `${triggerSuppressed} signal(s) held: waiting for a new closed candle or favourable re-entry step`,
+        );
+      }
       if (entered.length > 0) {
         this.note = this.deps.live
           ? `opened ${entered.length}: ${entered.join(" · ")}`
@@ -547,6 +633,7 @@ export class AgentEngine {
       note: this.note,
       activity: this.journal.recent(80),
       tradeLog: this.deps.executor.statePayload().tradeLog,
+      entryTriggers: [...this.entryTriggers.values()].slice(-500),
       executor: this.deps.executor.statePayload(),
     };
   }
