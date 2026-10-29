@@ -817,7 +817,7 @@ export class RiskExecutor {
    * for broker-SL synchronization and ATR refreshes.
    */
   onQuote(quote: Quote): void {
-    if (!this.deps.live || this.killActive()) return;
+    if (!this.deps.live) return;
     const now = Date.now();
     if (!isFreshQuote(quote.timestamp, now, this.deps.config.maxQuoteAgeMs)) return;
 
