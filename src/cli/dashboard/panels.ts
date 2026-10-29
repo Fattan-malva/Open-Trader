@@ -1264,7 +1264,9 @@ function stack(blocks: string[]): string {
 }
 
 export function renderDashboard(state: DashboardState, layout: DashboardLayout): string {
-  const width = Math.max(100, layout.width);
+  // Respect the actual terminal width; forcing 100 columns can make rows overflow
+  // 90–99 column terminals and push the lower dashboard content out of view.
+  const width = Math.max(90, layout.width);
   const height = Math.max(24, layout.height);
   const inner = width - 4;
   const { view, equity } = state;
