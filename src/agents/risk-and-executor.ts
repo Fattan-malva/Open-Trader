@@ -376,12 +376,9 @@ export class RiskExecutor {
     const gate = this.tradingAllowed(view);
     if (!gate.ok) return { ok: false, reason: gate.reason };
     if (Date.now() > signal.expiresAt) return { ok: false, reason: "signal expired" };
-    if (view.positions.length >= this.deps.config.maxOpenPositions) {
-      return { ok: false, reason: `position cap ${this.deps.config.maxOpenPositions}` };
-    }
-    if (view.positions.some((position) => position.instrument === signal.symbol)) {
-      return { ok: false, reason: `position already open for ${signal.symbol}` };
-    }
+    // Repeated entries on the same symbol and any total position count are allowed.
+    // Aggregate open risk, per-trade sizing, free margin, and daily-loss limits
+    // below remain the account-level safety gates.
     const managedIds = new Set(this.managed.keys());
     if (view.positions.some((position) => !managedIds.has(position.position_id))) {
       return { ok: false, reason: "unmanaged position present; total account risk cannot be verified" };
