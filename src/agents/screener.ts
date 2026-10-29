@@ -357,6 +357,7 @@ interface CandleCacheEntry {
   boundary: number;
   /** Avoid scheduling repeated requests inside one timeframe boundary. */
   requestedBoundary: number;
+  retryAfter: number;
   loading: boolean;
 }
 
@@ -416,6 +417,7 @@ export class Screener {
         candles: [],
         boundary: -1,
         requestedBoundary: -1,
+        retryAfter: 0,
         loading: false,
       };
       cache.set(symbol, entry);
@@ -423,6 +425,7 @@ export class Screener {
 
     if (
       !entry.loading &&
+      now >= entry.retryAfter &&
       entry.requestedBoundary < requestedBoundary &&
       (entry.candles.length < minimumCandles || entry.boundary < requestedBoundary)
     ) {
@@ -433,11 +436,15 @@ export class Screener {
           const completedAt = Date.now();
           if (!result.ok) {
             this.cacheFailures += 1;
+            entry!.requestedBoundary = -1;
+            entry!.retryAfter = Date.now() + 5_000;
             return;
           }
           const candles = dropFormingCandle(result.data, duration, completedAt);
           if (candles.length < minimumCandles) {
             this.cacheFailures += 1;
+            entry!.requestedBoundary = -1;
+            entry!.retryAfter = Date.now() + 5_000;
             return;
           }
           entry!.candles = candles;
@@ -445,6 +452,8 @@ export class Screener {
         })
         .catch(() => {
           this.cacheFailures += 1;
+          entry!.requestedBoundary = -1;
+          entry!.retryAfter = Date.now() + 5_000;
         })
         .finally(() => {
           entry!.loading = false;
