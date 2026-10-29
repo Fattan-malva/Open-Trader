@@ -66,20 +66,42 @@ test("all agent containers keep the tallest ENTRY height when later logs are sho
     tradeLog: [],
     executor: { managed: [], stats: {}, trailing: [], tradeLog: [] },
   };
+  const scannerActivity = Array.from({ length: 24 }, (_, index) => ({
+    at: now - (48 - index) * 1_000,
+    agent: "screener",
+    message: `scan PAIR${String(index + 1).padStart(2, "0")}`,
+    tone: "info",
+  }));
+  const traderActivity = Array.from({ length: 24 }, (_, index) => ({
+    at: now - (24 - index) * 1_000,
+    agent: "trader",
+    message: `adopt PAIR${String(index + 1).padStart(2, "0")}`,
+    tone: "info",
+  }));
   const longEntryState = {
     ...base,
-    activity: [{
-      at: now,
-      agent: "entry",
-      message: "open ditolak XAUUSD: " +
-        "price changed while checking minimum lot and aggregate risk budget ".repeat(10),
-      tone: "warn",
-    }],
+    activity: [
+      ...scannerActivity,
+      ...traderActivity,
+      {
+        at: now,
+        agent: "entry",
+        message: "open ditolak XAUUSD: " +
+          "price changed while checking minimum lot and aggregate risk budget ".repeat(10),
+        tone: "warn",
+      },
+    ],
   } as unknown as AgentStateFile;
-  const tallHeights = renderedPanelHeights(renderAgentContainers(longEntryState, 90));
+  const tallRendered = renderAgentContainers(longEntryState, 90);
+  const tallHeights = renderedPanelHeights(tallRendered);
   assert.equal(tallHeights.length, 3);
   assert.ok(tallHeights[0]! > 6, "long ENTRY diagnostics should grow the cards");
   assert.deepEqual(tallHeights, [tallHeights[0], tallHeights[0], tallHeights[0]]);
+  const plainTall = tallRendered.replace(/\u001b\[[0-9;]*m/g, "");
+  assert.ok(plainTall.includes("SCAN PAIR01"), "SCREENER should use more than the last four log rows");
+  assert.ok(plainTall.includes("SCAN PAIR24"), "SCREENER should show the newest log rows too");
+  assert.ok(plainTall.includes("ADOPT PAIR01"), "TRADER should use the available panel height");
+  assert.ok(plainTall.includes("ADOPT PAIR24"), "TRADER should include its newest log rows");
 
   const shortLogState = {
     ...base,
