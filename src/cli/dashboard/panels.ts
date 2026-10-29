@@ -811,6 +811,9 @@ function lastAgentActivity(
 /** Recent log lines for one agent role, shown under its own card. */
 function conciseAgentMessage(entry: AgentActivity): string {
   const message = entry.message.replace(/\s+/g, " ").trim();
+  // ENTRY logs are diagnostic records: preserve the full reject reason and
+  // sizing details rather than reducing them to "REJECT XAUUSD".
+  if (entry.agent === "entry") return message;
   const symbol = message.match(/\b([A-Z][A-Z0-9._-]{2,})\b/g)?.find((token) =>
     !["CLOSE", "OPEN", "TS", "SL", "TRAIL", "ERROR", "ERR", "SKIP", "SCAN", "ENTRY", "BUY", "SELL", "PASS", "NO", "SIGNAL", "PROTECT", "ADOPT", "VIRTUAL", "HIT"].includes(token),
   );
@@ -853,46 +856,77 @@ function conciseAgentMessage(entry: AgentActivity): string {
     if (/error|failed/i.test(message)) return `SCAN ERR ${symbol ?? ""}`.trim();
   }
 
-  if (entry.agent === "entry") {
-    const side = message.match(/\b(buy|sell)\b/i)?.[1]?.toUpperCase();
-    const lot = message.match(/([0-9]+(?:\.[0-9]+)?)\s*lot/i)?.[1];
-    if (/reject|blocked|skip|denied/i.test(message)) return `REJECT ${symbol ?? ""}`.trim();
-    if (/confirm|opened|placed|executed|entry/i.test(message)) {
-      return [side ?? "ENTRY", symbol, lot ? `${lot}L` : undefined].filter(Boolean).join(" ");
-    }
-    if (/error|failed/i.test(message)) return `ENTRY ERR ${symbol ?? ""}`.trim();
-  }
-
   // Let panel.fitLine truncate against the actual available inner width, right before the border.
   return message;
 }
 
+function wrapPlainText(message: string, width: number): string[] {
+  const maxWidth = Math.max(1, Math.trunc(width));
+  const words = message.split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let line = "";
+  for (const word of words) {
+    if (word.length > maxWidth) {
+      if (line) lines.push(line);
+      line = "";
+      for (let offset = 0; offset < word.length; offset += maxWidth) {
+        const chunk = word.slice(offset, offset + maxWidth);
+        if (offset + maxWidth < word.length) lines.push(chunk);
+        else line = chunk;
+      }
+      continue;
+    }
+    if (!line) line = word;
+    else if (line.length + 1 + word.length <= maxWidth) line += ` ${word}`;
+    else {
+      lines.push(line);
+      line = word;
+    }
+  }
+  if (line) lines.push(line);
+  return lines.length ? lines : [""];
+}
+
+function agentMessageStyle(entry: AgentActivity, message: string): string {
+  const closePnl = entry.agent === "trader"
+    ? message.match(/^CLOSE\s+\S+\s+([+-]?\d+(?:\.\d+)?)$/i)
+    : null;
+  return closePnl
+    ? Number(closePnl[1]) < 0
+      ? style.red(message)
+      : Number(closePnl[1]) > 0
+        ? style.green(message)
+        : style.dim(message)
+    : entry.tone === "error"
+      ? style.red(message)
+      : entry.tone === "warn"
+        ? style.yellow(message)
+        : entry.tone === "success"
+          ? style.green(message)
+          : style.dim(message);
+}
+
+/** Recent log lines for one agent role, shown under its own card. */
 function agentLogLines(
   agent: AgentStateFile | null | undefined,
   role: AgentRole,
   limit = 4,
+  panelInnerWidth?: number,
 ): string[] {
   const entries = (agent?.activity ?? []).filter((entry) => entry.agent === role);
   if (entries.length === 0) return [style.dim("· belum ada log")];
-  return entries.slice(-limit).map((entry) => {
+  return entries.slice(-limit).flatMap((entry) => {
     const message = conciseAgentMessage(entry);
-    const closePnl = entry.agent === "trader"
-      ? message.match(/^CLOSE\s+\S+\s+([+-]?\d+(?:\.\d+)?)$/i)
-      : null;
-    const text = closePnl
-      ? Number(closePnl[1]) < 0
-        ? style.red(message)
-        : Number(closePnl[1]) > 0
-          ? style.green(message)
-          : style.dim(message)
-      : entry.tone === "error"
-        ? style.red(message)
-        : entry.tone === "warn"
-          ? style.yellow(message)
-          : entry.tone === "success"
-            ? style.green(message)
-            : style.dim(message);
-    return `${style.dim(shortClock(entry.at))} ${text}`;
+    if (role === "entry" && panelInnerWidth !== undefined) {
+      // The first line carries HH:MM:SS; follow-up lines align under the
+      // message with a continuation marker. No ellipsis/truncation is used.
+      const messageWidth = Math.max(8, panelInnerWidth - 11);
+      const wrapped = wrapPlainText(message, messageWidth);
+      return wrapped.map((part, index) => index === 0
+        ? `${style.dim(shortClock(entry.at))} ${agentMessageStyle(entry, part)}`
+        : `${" ".repeat(9)}${style.dim("↳ ")}${agentMessageStyle(entry, part)}`);
+    }
+    return [`${style.dim(shortClock(entry.at))} ${agentMessageStyle(entry, message)}`];
   });
 }
 
@@ -926,7 +960,7 @@ function screenerPanelLines(agent: AgentStateFile | null | undefined): string[] 
   return withLog("SCREENER", head, agentLogLines(agent, "screener", 4));
 }
 
-function entryPanelLines(agent: AgentStateFile | null | undefined): string[] {
+function entryPanelLines(agent: AgentStateFile | null | undefined, width: number): string[] {
   if (!agent) {
     return [
       style.dim("menunggu sinyal"),
@@ -946,7 +980,7 @@ function entryPanelLines(agent: AgentStateFile | null | undefined): string[] {
       ? `entry ${signal.entry ?? "—"} · SL ${signal.sl ?? "—"} · trail ${signal.trail ?? "—"}`
       : style.dim(`${timeframes?.confirm ?? "M1"} close → entry → risk`),
   ];
-  return withLog("ENTRY", head, agentLogLines(agent, "entry", 4));
+  return withLog("ENTRY", head, agentLogLines(agent, "entry", 4, Math.max(8, width - 4)));
 }
 
 function traderPanelLines(agent: AgentStateFile | null | undefined): string[] {
@@ -981,7 +1015,7 @@ export function renderAgentContainers(
     return row(
       [
         panel(`SCREENER · ${status}`, screenerPanelLines(agent), widths[0]!, "cyan"),
-        panel(`ENTRY · ${status}`, entryPanelLines(agent), widths[1]!, "green"),
+        panel(`ENTRY · ${status}`, entryPanelLines(agent, widths[1]!), widths[1]!, "green"),
         panel(`TRADER · ${status}`, traderPanelLines(agent), widths[2]!, "yellow"),
       ],
       " ",
@@ -989,7 +1023,7 @@ export function renderAgentContainers(
   }
   return [
     panel(`SCREENER · ${status}`, screenerPanelLines(agent), width, "cyan"),
-    panel(`ENTRY · ${status}`, entryPanelLines(agent), width, "green"),
+    panel(`ENTRY · ${status}`, entryPanelLines(agent, width), width, "green"),
     panel(`TRADER · ${status}`, traderPanelLines(agent), width, "yellow"),
   ].join("\n");
 }
@@ -1267,10 +1301,12 @@ export function renderDashboard(state: DashboardState, layout: DashboardLayout):
   );
 
   // ------------------------------------------------ layout budget
-  // header (4) + agent row (10) + footer (1)
+  // ENTRY diagnostics may wrap to multiple rows. Reserve their actual height
+  // so the remaining dashboard layout adapts rather than clipping the log.
   const bottomRows = height >= 44 ? 5 : height >= 40 ? 4 : 3;
   const bottomPanelH = bottomRows + 2;
-  const mainHeight = Math.max(10, height - 15);
+  const reservedRows = header.split("\n").length + (agentBlock ? agentBlock.split("\n").length : 0) + 1;
+  const mainHeight = Math.max(10, height - reservedRows);
 
   // Left column: KPI cards + P&L chart + account + history (below account, same width)
   const leftBaseBlocks = [kpi];
