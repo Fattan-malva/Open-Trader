@@ -132,7 +132,12 @@ export class AgentEngine {
     this.screener = new Screener(deps.tools, deps.ticks, screenerOptionsFrom(deps.config));
     this.stateFile = deps.stateFile ?? path.join(deps.cacheDir, "agent-state.json");
     this.journal = deps.journal;
-    this.deps.ticks.onQuote = (quote) => this.screener.observe(quote);
+    this.deps.ticks.onQuote = (quote) => {
+      this.screener.observe(quote);
+      // TS VIRT consumes each live quote directly; broker/account management
+      // continues on its separate, rate-limited timer.
+      this.deps.executor.onQuote(quote);
+    };
   }
 
   /** Record an activity line for one agent and mirror it to stdout. */
