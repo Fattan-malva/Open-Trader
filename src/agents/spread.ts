@@ -51,11 +51,13 @@ export function observeSpread(quote: Quote): void {
 
   const series = spreadHistory.get(quote.symbol) ?? [];
   const last = series[series.length - 1];
+  const sampleValue = categorize(quote.symbol) === "fx" ? quote.spread : quote.spreadPct;
+  if (!Number.isFinite(sampleValue) || sampleValue <= 0) return;
   if (last && quote.timestamp >= last.at && quote.timestamp - last.at < SAMPLE_INTERVAL_MS) {
     last.at = quote.timestamp;
-    last.value = quote.spread;
+    last.value = sampleValue;
   } else {
-    series.push({ at: quote.timestamp, value: quote.spread });
+    series.push({ at: quote.timestamp, value: sampleValue });
   }
 
   const cutoff = quote.timestamp - HISTORY_WINDOW_MS;
