@@ -49,6 +49,7 @@ export interface AgentConfig {
   /** Dynamic account-wide exposure limits. */
   maxOpenPositions: number;
   maxOpenRiskPct: number;
+  maxDailyLossPct: number;
   /** Fraction of free margin that must remain unused. */
   marginReservePct: number;
 
@@ -133,6 +134,7 @@ export function loadAgentConfig(
     marginBuffer: Math.max(1, num(env, "AGENT_MARGIN_BUFFER", 3)),
     maxOpenPositions: Math.max(1, Math.trunc(num(env, "AGENT_MAX_OPEN_POSITIONS", 3))),
     maxOpenRiskPct: Math.max(0.1, num(env, "AGENT_MAX_OPEN_RISK_PCT", 2)),
+    maxDailyLossPct: Math.max(0, num(env, "AGENT_MAX_DAILY_LOSS_PCT", 3)),
     marginReservePct: Math.min(90, Math.max(0, num(env, "AGENT_MARGIN_RESERVE_PCT", 25))),
 
     emergencySlAtrFactor: num(env, "AGENT_EMERGENCY_SL_ATR", 1.5),
