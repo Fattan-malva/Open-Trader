@@ -130,6 +130,9 @@ export class AgentEngine {
   private lastFeedRestartAt = 0;
   private manageBackoffUntil = 0;
   private lastManageErrorAt = 0;
+  private lastScanStatsLogAt = 0;
+  private lastEntryRejectLogAt = 0;
+  private lastTriggerHoldLogAt = 0;
   private readonly entryTriggers = new Map<string, EntryTriggerState>();
   private readonly entryRetryAt = new Map<string, number>();
 
@@ -346,7 +349,6 @@ export class AgentEngine {
     this.scanning = true;
     const started = Date.now();
     try {
-      this.record("screener", `scan started · ${this.deps.universe.length} pairs`);
       const candidates = await this.screener.scan(this.deps.universe);
       if (this.stopped) return;
       this.candidates = candidates;
@@ -358,38 +360,43 @@ export class AgentEngine {
       this.note = gate.ok ? "" : gate.reason ?? "";
 
       const diagnostics = this.screener.lastDiagnostics;
-      this.record(
-        "screener",
-        `fresh ${diagnostics.fresh}/${diagnostics.withQuote} · prefilter ${diagnostics.prefiltered} · ` +
-          `shortlist ${diagnostics.shortlist} · cache pending ${diagnostics.cachePending} · cache errors ${diagnostics.cacheFailures} · ` +
-          `spread reject ${diagnostics.spreadRejected} (${diagnostics.spreadSpikeRejected} spikes) · pass ${diagnostics.passed}`,
-      );
-      const rejectionSummary = Object.entries(diagnostics.scoreRejects)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 5)
-        .map(([reason, count]) => `${reason} ${count}`)
-        .join(" · ");
-      if (rejectionSummary) {
-        this.record("screener", `screen rejects ${rejectionSummary}`, "warn");
-      }
-      if (diagnostics.top.length > 0) {
+      // Keep the 2-second scan loop observable without flooding the dashboard
+      // journal with repetitive lines; order events are still logged immediately.
+      if (Date.now() - this.lastScanStatsLogAt >= 5_000) {
+        this.lastScanStatsLogAt = Date.now();
         this.record(
           "screener",
-          `top ${diagnostics.top
-            .slice(0, 4)
-            .map((entry) => `${entry.symbol} ${entry.prelim}`)
-            .join(" · ")}`,
+          `fresh ${diagnostics.fresh}/${diagnostics.withQuote} · prefilter ${diagnostics.prefiltered} · ` +
+            `shortlist ${diagnostics.shortlist} · cache pending ${diagnostics.cachePending} · cache errors ${diagnostics.cacheFailures} · ` +
+            `spread reject ${diagnostics.spreadRejected} (${diagnostics.spreadSpikeRejected} spikes) · pass ${diagnostics.passed}`,
+        );
+        const rejectionSummary = Object.entries(diagnostics.scoreRejects)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 5)
+          .map(([reason, count]) => `${reason} ${count}`)
+          .join(" · ");
+        if (rejectionSummary) {
+          this.record("screener", `screen rejects ${rejectionSummary}`, "warn");
+        }
+        if (diagnostics.top.length > 0) {
+          this.record(
+            "screener",
+            `top ${diagnostics.top
+              .slice(0, 4)
+              .map((entry) => `${entry.symbol} ${entry.prelim}`)
+              .join(" · ")}`,
+          );
+        }
+        this.record(
+          "screener",
+          `scan ${((Date.now() - started) / 1000).toFixed(1)}s · ${candidates.length} kandidat` +
+            (candidates[0]
+              ? ` · ${candidates[0].symbol} ${candidates[0].direction} ${candidates[0].setupType} ${candidates[0].score.toFixed(0)}`
+              : "") +
+            (gate.ok ? "" : ` · ${gate.reason}`),
+          gate.ok ? "success" : "warn",
         );
       }
-      this.record(
-        "screener",
-        `scan ${((Date.now() - started) / 1000).toFixed(1)}s · ${candidates.length} kandidat` +
-          (candidates[0]
-            ? ` · ${candidates[0].symbol} ${candidates[0].direction} ${candidates[0].setupType} ${candidates[0].score.toFixed(0)}`
-            : "") +
-          (gate.ok ? "" : ` · ${gate.reason}`),
-        gate.ok ? "success" : "warn",
-      );
 
       if (!gate.ok) {
         this.writeState(view);
@@ -505,7 +512,8 @@ export class AgentEngine {
         tried.push(`${candidate.symbol}: ${opened.reason ?? "rejected"}`);
       }
 
-      if (triggerSuppressed > 0) {
+      if (triggerSuppressed > 0 && Date.now() - this.lastTriggerHoldLogAt >= 10_000) {
+        this.lastTriggerHoldLogAt = Date.now();
         this.record(
           "entry",
           `${triggerSuppressed} signal(s) held: waiting for a new closed candle or favourable re-entry step`,
@@ -517,7 +525,10 @@ export class AgentEngine {
           : `dry-run signals: ${entered.join(" · ")}`;
       } else if (tried.length > 0) {
         this.note = tried[0] ?? "";
-        this.record("entry", `entry ${tried.join(" · ")}`, "warn");
+        if (Date.now() - this.lastEntryRejectLogAt >= 5_000) {
+          this.lastEntryRejectLogAt = Date.now();
+          this.record("entry", `entry ${tried.join(" · ")}`, "warn");
+        }
       }
       this.writeState(view);
     } catch (error) {
