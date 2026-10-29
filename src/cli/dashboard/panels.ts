@@ -856,8 +856,8 @@ function conciseAgentMessage(entry: AgentActivity): string {
     if (/error|failed/i.test(message)) return `ENTRY ERR ${symbol ?? ""}`.trim();
   }
 
-  // Keep unrecognized events readable in narrow side-by-side panels.
-  return message.length > 20 ? `${message.slice(0, 19)}…` : message;
+  // Let panel.fitLine truncate against the actual available inner width, right before the border.
+  return message;
 }
 
 function agentLogLines(
