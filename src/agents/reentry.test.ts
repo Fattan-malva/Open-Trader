@@ -74,3 +74,24 @@ test("minimum price step applies when ATR-based step is smaller", () => {
     previous,
   }), false);
 });
+test("legacy entry watermark without candle time requires favourable price progress", () => {
+  assert.equal(shouldOpenReentry({
+    side: "buy",
+    candleTime: "2026-10-29T10:01:00.000Z",
+    price: 1.1001,
+    atr: 0.001,
+    stepAtr: 0.2,
+    minimumStep: 0.0001,
+    previous: { ...previous, candleTime: "" },
+  }), false);
+  assert.equal(shouldOpenReentry({
+    side: "buy",
+    candleTime: "2026-10-29T10:01:00.000Z",
+    price: 1.1002,
+    atr: 0.001,
+    stepAtr: 0.2,
+    minimumStep: 0.0001,
+    previous: { ...previous, candleTime: "" },
+  }), true);
+});
+
