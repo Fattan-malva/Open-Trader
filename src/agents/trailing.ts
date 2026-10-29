@@ -141,6 +141,21 @@ export function virtualStopLocksProfit(
 }
 
 /**
+ * Distance the current virtual stop has locked beyond entry, in price units.
+ * A stop still on the loss side returns 0 — it has secured nothing, even
+ * though its absolute distance from entry is non-zero.
+ */
+export function lockedProfitDistance(
+  side: PositionSide,
+  stop: number,
+  entry: number,
+): number {
+  if (!Number.isFinite(stop) || !Number.isFinite(entry) || entry <= 0) return 0;
+  const locked = side === "buy" ? stop - entry : entry - stop;
+  return Number.isFinite(locked) && locked > 0 ? locked : 0;
+}
+
+/**
  * Before the first profit-locking move, do not publish an intermediate trail
  * update that still leaves the stop on the loss side of entry. Once locked,
  * the ordinary monotonic ratchet may tighten the stop further.
@@ -163,6 +178,54 @@ export function canMoveTrailStop(
   return side === "buy"
     ? nextStop >= entry + minimumProfitDistance
     : nextStop <= entry - minimumProfitDistance;
+}
+
+/**
+ * Adverse distance (in price units) at which a losing position is closed at
+ * market instead of waiting for the wider broker emergency stop.
+ *
+ * Two independent bounds are combined and the tighter one wins:
+ *   - a fraction of the planned stop risk (`riskPct`), and
+ *   - a multiple of the live ATR (`atrFactor`).
+ *
+ * The result is floored by `minDistance` so spread/noise cannot trigger it.
+ * Returns NaN when neither bound can be evaluated (cut disabled).
+ */
+export function lossCutDistance(input: {
+  riskDistance: number;
+  riskPct: number;
+  atr: number;
+  atrFactor: number;
+  minDistance: number;
+}): number {
+  const riskCut =
+    Number.isFinite(input.riskDistance) && input.riskDistance > 0 &&
+    Number.isFinite(input.riskPct) && input.riskPct > 0
+      ? input.riskDistance * Math.min(1, input.riskPct / 100)
+      : Number.POSITIVE_INFINITY;
+  const atrCut =
+    Number.isFinite(input.atr) && input.atr > 0 &&
+    Number.isFinite(input.atrFactor) && input.atrFactor > 0
+      ? input.atr * input.atrFactor
+      : Number.POSITIVE_INFINITY;
+  const cut = Math.min(riskCut, atrCut);
+  if (!Number.isFinite(cut)) return Number.NaN;
+  const minimum =
+    Number.isFinite(input.minDistance) && input.minDistance > 0 ? input.minDistance : 0;
+  return Math.max(cut, minimum);
+}
+
+/** True when the executable side has moved `cut` against the entry. */
+export function lossCutHit(
+  side: PositionSide,
+  entry: number,
+  bid: number,
+  ask: number,
+  cut: number,
+): boolean {
+  if (!Number.isFinite(cut) || cut <= 0 || !Number.isFinite(entry) || entry <= 0) return false;
+  const adverse = side === "buy" ? entry - bid : ask - entry;
+  return Number.isFinite(adverse) && adverse >= cut;
 }
 
 /**

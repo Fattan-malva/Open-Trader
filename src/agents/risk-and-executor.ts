@@ -23,6 +23,8 @@ import {
   canMoveTrailStop,
   initialVirtualStop,
   isFreshQuote,
+  lossCutDistance,
+  lossCutHit,
   profitLockCushion,
   profitLockStop,
   profitTrailDistanceFromAtr,
@@ -44,6 +46,27 @@ const TS_CLOSE_RETRY_BASE_MS = 250;
 const TS_CLOSE_RETRY_MAX_MS = 5_000;
 
 /** Faster retries for a moving quote, with bounded backoff for persistent errors. */
+/**
+ * Check whether a new entry on `symbol` would exceed per-symbol limits.
+ * Returns a rejection reason string, or undefined if allowed.
+ */
+export function symbolEntryAllowed(
+  symbol: string,
+  openCountOnSymbol: number,
+  maxOpenPerSymbol: number,
+  lastClosedAtMs: number | undefined,
+  cooldownMs: number,
+): string | undefined {
+  if (openCountOnSymbol >= maxOpenPerSymbol) {
+    return `${symbol} already has ${openCountOnSymbol} open (max ${maxOpenPerSymbol})`;
+  }
+  if (cooldownMs > 0 && lastClosedAtMs && Date.now() - lastClosedAtMs < cooldownMs) {
+    const waitMs = Math.ceil(cooldownMs - (Date.now() - lastClosedAtMs));
+    return `${symbol} cooldown ${Math.ceil(waitMs / 1000)}s`;
+  }
+  return undefined;
+}
+
 export function closeRetryDelayMs(attempt: number, message = ""): number {
   const error = message.toLowerCase();
   const exponent = Math.max(0, Math.min(6, Math.trunc(attempt) - 1));
@@ -57,7 +80,10 @@ export function closeRetryDelayMs(attempt: number, message = ""): number {
 }
 
 export function indicatesPositionAlreadyClosed(message: string): boolean {
-  return /position.{0,30}(not found|does not exist|doesn't exist|already closed|is closed|not open)|already.{0,20}closed|no such position/i.test(message);
+  // Broker error codes arrive SCREAMING_SNAKE_CASE (REQUEST_POSITION_NOT_FOUND)
+  // while prose arrives with spaces; normalise both before matching.
+  const text = message.replace(/[_-]+/g, " ");
+  return /position.{0,30}(not found|does not exist|doesn't exist|already closed|is closed|not open)|already.{0,20}closed|no such position/i.test(text);
 }
 
 export interface ManagedPosition {
@@ -84,6 +110,8 @@ export interface ManagedPosition {
   riskUsd?: number;
   /** USD value of one pip per lot, captured from contract metadata at open. */
   pipValueUsdPerLot?: number;
+  /** Planned entry→emergency-stop distance in price units, frozen at open. */
+  riskDistance?: number;
   lastBrokerStopMoveAt?: number;
 
   openedAt: number;
@@ -292,23 +320,22 @@ function improved(side: PositionSide, next: number, current: number, epsilon: nu
 }
 
 /**
- * Progressive trail-tightening factor.
+ * Post-lock trail distance as a fraction of the trade's planned risk (R).
  *
- * The base factor is `profitTrailAtrFactor`. As the position's peak profit
- * (measured in ATRs) grows, the effective factor shrinks so the trail moves
- * closer to price:
+ * The distance must stay wide while the trade is young, otherwise ordinary
+ * M1 noise closes it a pip above entry. Realized history showed exactly that:
+ * winners averaged +0.16R while losers ran to -0.69R, which no win rate can
+ * offset.
  *
- *   peak 0.0 ATR -> factor × 1.00
- *   peak 1.0 ATR -> factor × 0.60
- *   peak 2.0+ ATR -> factor × 0.30  (floor)
- *
- * The floor prevents the trail distance from collapsing to zero during a
- * runaway move, which would make the stop jump on every tick.
+ *   peak profit < 1R  -> 0.75R  (ride the move, stop already at break-even)
+ *   peak profit < 2R  -> 0.50R
+ *   peak profit >= 2R -> 0.35R  (floor)
  */
-function profitTrailFactorMultiplier(progressAtr: number): number {
-  const p = Math.max(0, Math.min(2, progressAtr));
-  // 40% reduction by 1 ATR, then another 30% reduction by 2 ATR.
-  return Math.max(0.3, 1 - p * 0.4 + Math.max(0, p - 1) * 0.1);
+function profitTrailRiskFraction(progressR: number): number {
+  const p = Math.max(0, progressR);
+  if (p < 1) return 0.75;
+  if (p < 2) return 0.5;
+  return 0.35;
 }
 
 export class RiskExecutor {
@@ -329,6 +356,8 @@ export class RiskExecutor {
   private readonly recentlyFinalized = new Map<string, number>();
   /** Backoff for positions that could not be adopted yet (missing data/API error). */
   private readonly adoptRetryAt = new Map<string, number>();
+  /** Last close timestamp per symbol; enforces symbolCooldownMs. */
+  private readonly lastClosedAtBySymbol = new Map<string, number>();
   private syncing = false;
   private trailing: Array<{ at: number; symbol: string; positionId: string; sl: number }> = [];
   private tradeLog: TradeLogEntry[] = [];
@@ -419,6 +448,9 @@ export class RiskExecutor {
         pipValueUsdPerLot: storedPipValueUsdPerLot > 0
           ? storedPipValueUsdPerLot
           : inferredPipValueUsdPerLot,
+        riskDistance: Number(position.riskDistance) > 0
+          ? Number(position.riskDistance)
+          : Math.abs(entry - emergencySl),
         lastBrokerStopMoveAt: 0,
         openedAt: Number(position.openedAt) || Date.now(),
         // Force a fresh trail ATR read on the first manage tick after a restart.
@@ -524,12 +556,26 @@ export class RiskExecutor {
     const gate = this.tradingAllowed(view);
     if (!gate.ok) return { ok: false, reason: gate.reason };
     if (Date.now() > signal.expiresAt) return { ok: false, reason: "signal expired" };
-    // Repeated entries on the same symbol and any total position count are allowed.
-    // Aggregate open risk, per-trade sizing, free margin, and daily-loss limits
-    // below remain the account-level safety gates.
     const managedIds = new Set(this.managed.keys());
     if (view.positions.some((position) => !managedIds.has(position.position_id))) {
       return { ok: false, reason: "unmanaged position present; total account risk cannot be verified" };
+    }
+    // Same-symbol stacking guard. The realized book repeatedly pyramided one
+    // setup (11 XAUUSD SELLs in a single session), which inflates correlated
+    // exposure far beyond the per-trade risk target. Cap open count per symbol
+    // and respect a cooldown after a close before re-entering the same name.
+    const sameSymbolOpen = [...this.managed.values()].filter(
+      (m) => m.symbol === signal.symbol && !m.closing && !m.closeRequested,
+    ).length;
+    const stackingReason = symbolEntryAllowed(
+      signal.symbol,
+      sameSymbolOpen,
+      this.deps.config.maxOpenPerSymbol,
+      this.lastClosedAtBySymbol.get(signal.symbol),
+      this.deps.config.symbolCooldownMs,
+    );
+    if (stackingReason) {
+      return { ok: false, reason: stackingReason };
     }
 
     let quote = this.deps.ticks.get(signal.symbol);
@@ -788,6 +834,7 @@ export class RiskExecutor {
       riskUsd: (Number(position.volume) > 0 ? Number(position.volume) : finalLots) *
         (Math.abs(entry - emergencySl) / pip) * pipValuePerLot,
       pipValueUsdPerLot: pipValuePerLot,
+      riskDistance: Math.abs(entry - emergencySl),
       lastBrokerStopMoveAt: 0,
       openedAt: Date.now(),
       lastAtrSyncAt: candleBoundary(this.deps.config.trailTimeframe),
@@ -996,6 +1043,7 @@ export class RiskExecutor {
       trailActivated: virtualStopLocksProfit(side, trailStop, entry),
       riskUsd: (stopDistance / pip) * volume * pipValueUsdPerLot,
       pipValueUsdPerLot,
+      riskDistance: stopDistance,
       lastBrokerStopMoveAt: 0,
       openedAt: Date.parse(position.create_time) || now,
       lastAtrSyncAt: atrValue > 0 ? candleBoundary(this.deps.config.trailTimeframe, now) : 0,
@@ -1111,13 +1159,24 @@ export class RiskExecutor {
       this.deps.config.profitLockMinPips * managed.pip,
     );
     let activatedNow = false;
-    if (!managed.trailActivated && cushion > 0) {
+    // Require real progress (in R) before pulling the stop to break-even. A
+    // lock triggered by the spread cushion alone gets closed by ordinary
+    // noise for a scratch, which is what kept the win side of the book tiny.
+    const lockRiskDistance =
+      managed.riskDistance !== undefined && managed.riskDistance > 0
+        ? managed.riskDistance
+        : Math.abs(managed.entry - managed.emergencySl);
+    const requiredProfit = Math.max(
+      cushion,
+      this.deps.config.profitLockActivateR * lockRiskDistance,
+    );
+    if (!managed.trailActivated && requiredProfit > 0) {
       const executable = managed.side === "buy" ? quote.bid : quote.ask;
       const profit = managed.side === "buy"
         ? executable - managed.entry
         : managed.entry - executable;
       const rawLock = profitLockStop(managed.side, managed.entry, cushion);
-      if (Number.isFinite(profit) && profit >= cushion && Number.isFinite(rawLock)) {
+      if (Number.isFinite(profit) && profit >= requiredProfit && Number.isFinite(rawLock)) {
         // Floor a BUY lock / ceil a SELL lock so rounding never shaves the cushion.
         const factor = 10 ** managed.digits;
         const lock = (managed.side === "buy"
@@ -1139,7 +1198,9 @@ export class RiskExecutor {
             price: lock,
             reason:
               `TS VIRT locked ${(cushion / managed.pip).toFixed(1)}p beyond entry ` +
-              `(spread ${(quote.spread / managed.pip).toFixed(1)}p paid)`,
+              `after ${(profit / managed.pip).toFixed(1)}p peak ` +
+              `(${lockRiskDistance > 0 ? (profit / lockRiskDistance).toFixed(2) : "0"}R, ` +
+              `spread ${(quote.spread / managed.pip).toFixed(1)}p paid)`,
             ok: true,
           });
         }
@@ -1157,6 +1218,23 @@ export class RiskExecutor {
 
     if (managed.trailActivated) {
       this.tightenProfitTrailDistance(managed, quote, activatedNow ? "first profit lock" : "live tick");
+    }
+
+    // Adverse-side TS: a position that never locked profit must not be allowed
+    // to run all the way to the wide broker emergency stop. Cut it at market
+    // once it has travelled the configured adverse distance.
+    if (!managed.trailActivated && !managed.closeRequested) {
+      const cut = this.lossCutDistanceFor(managed);
+      if (
+        Number.isFinite(cut) &&
+        lossCutHit(managed.side, managed.entry, quote.bid, quote.ask, cut)
+      ) {
+        managed.closeRequested ??=
+          `TS LOSS CUT | ${managed.side === "buy" ? "bid" : "ask"} ` +
+          `${managed.side === "buy" ? quote.bid : quote.ask} | ${(cut / managed.pip).toFixed(1)}p adverse`;
+        void this.closeFull(managed, managed.closeRequested);
+        return;
+      }
     }
 
     // Closing is event-driven: the same fresh tick that touches the virtual
@@ -1201,15 +1279,30 @@ export class RiskExecutor {
       : managed.entry - managed.best;
     const profitPips = Math.max(0, bestProfit / managed.pip);
     const atrPips = Math.max(managed.atr / managed.pip, managed.pip);
-    const progressAtr = profitPips / atrPips;
 
-    const shrink = profitTrailFactorMultiplier(progressAtr);
-    const effectiveFactor = this.deps.config.profitTrailAtrFactor * shrink;
+    // Progress is measured in R (multiples of the planned stop distance), not
+    // in ATRs: the trail must be wide relative to what the trade risks.
+    const riskDistance =
+      managed.riskDistance !== undefined && managed.riskDistance > 0
+        ? managed.riskDistance
+        : Math.abs(managed.entry - managed.emergencySl);
+    const riskPips = riskDistance > 0 ? riskDistance / managed.pip : 0;
+    const progressR = riskPips > 0 ? profitPips / riskPips : 0;
+    const fraction = profitTrailRiskFraction(progressR);
+
+    // The risk-relative target is an upper bound: never widen beyond the
+    // configured ATR distance, and never beyond the distance already in use.
+    const riskTarget = riskPips > 0 ? fraction * riskDistance : Number.NaN;
+    const atrTarget = this.deps.config.profitTrailAtrFactor * managed.atr;
+    const desired = Math.min(
+      Number.isFinite(riskTarget) && riskTarget > 0 ? riskTarget : Number.POSITIVE_INFINITY,
+      atrTarget > 0 ? atrTarget : Number.POSITIVE_INFINITY,
+    );
 
     const nextDistance = profitTrailDistanceFromAtr(
       managed.trailDistance,
-      managed.atr,
-      effectiveFactor,
+      desired,
+      1,
       this.deps.config.profitTrailMinPips * managed.pip,
       Number.isFinite(quote.spread) ? quote.spread : 0,
     );
@@ -1232,7 +1325,8 @@ export class RiskExecutor {
       reason:
         `TS profit distance ${(previousDistance / managed.pip).toFixed(1)}p → ` +
         `${(nextDistance / managed.pip).toFixed(1)}p ` +
-        `(${why}, peak ${profitPips.toFixed(1)}p / ${atrPips.toFixed(1)}p ATR × ${shrink.toFixed(2)})`,
+        `(${why}, peak ${profitPips.toFixed(1)}p = ${progressR.toFixed(2)}R, ` +
+        `trail ${fraction.toFixed(2)}R / ${(atrPips).toFixed(1)}p ATR)`,
       ok: true,
     });
     // Distance shrank → ratchet the stop closer right away on this same tick.
@@ -1403,6 +1497,24 @@ export class RiskExecutor {
   private triggerReason(managed: ManagedPosition, quote: Quote): string {
     const price = managed.side === "buy" ? quote.bid : quote.ask;
     return `TS VIRTUAL hit | bid/ask ${price} | trail ${(managed.trailDistance / managed.pip).toFixed(1)}p`;
+  }
+
+  /** Adverse distance at which a still-unlocked position is cut. */
+  private lossCutDistanceFor(managed: ManagedPosition): number {
+    if (this.deps.config.lossCutRiskPct <= 0 && this.deps.config.lossCutAtrFactor <= 0) {
+      return Number.NaN;
+    }
+    const riskDistance =
+      managed.riskDistance !== undefined && managed.riskDistance > 0
+        ? managed.riskDistance
+        : Math.abs(managed.entry - managed.emergencySl);
+    return lossCutDistance({
+      riskDistance,
+      riskPct: this.deps.config.lossCutRiskPct,
+      atr: managed.atr,
+      atrFactor: this.deps.config.lossCutAtrFactor,
+      minDistance: this.deps.config.lossCutMinPips * managed.pip,
+    });
   }
 
   private advanceStop(managed: ManagedPosition, why: string, quote?: Quote): void {
@@ -1711,6 +1823,7 @@ export class RiskExecutor {
       reason: `net ${realized.toFixed(2)} USD`,
       ok: true,
     });
+    this.lastClosedAtBySymbol.set(managed.symbol, Date.now());
     this.managed.delete(managed.positionId);
     this.realized.delete(managed.positionId);
   }

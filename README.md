@@ -64,7 +64,7 @@ open-trader · DEMO
   BALANCE / EQUITY / FREE MARGIN / POSITIONS
   SCREENER · ENTRY · TRADER        (side-by-side containers)
   AGENT LOG
-  POSITIONS                        (SL broker + TS VIRT + distance)
+  POSITIONS                        (SL broker + TS VIRT + distance + LOCK $)
   ACCOUNT · MARKET · RISK
   EQUITY / DRAWDOWN
   EVENTS · ORDERS
@@ -142,8 +142,9 @@ account.
 | Breakout RSI exhaustion | BUY ≤ 82 / SELL ≥ 18 | `AGENT_BREAKOUT_RSI_CEILING`, `AGENT_BREAKOUT_RSI_FLOOR` |
 | Spread cost | ≤ 40% of trail | `AGENT_MAX_SPREAD_TRAIL` |
 | Initial virtual trail | max(1.2×M1 ATR, 4 pips) | `AGENT_TRAIL_ATR`, `AGENT_TRAIL_MIN_PIPS` |
-| First profit lock | Triggered at spread + `AGENT_PROFIT_LOCK_MIN_PIPS`; stop placed at entry ± that cushion | `AGENT_PROFIT_LOCK_MIN_PIPS` |
-| Post-lock trail | max(0.3×ATR, 0.5 pips, 1.1×spread), then never widens | `AGENT_PROFIT_TRAIL_ATR`, `AGENT_PROFIT_TRAIL_MIN_PIPS` |
+| First profit lock | Requires entry ± max(spread+min pips, `AGENT_PROFIT_LOCK_ACTIVATE_R` × R) before stop pulled to break-even | `AGENT_PROFIT_LOCK_ACTIVATE_R`, `AGENT_PROFIT_LOCK_MIN_PIPS` |
+| Post-lock trail | min(`AGENT_PROFIT_TRAIL_ATR` × ATR, risk-relative fraction × R, current distance), then never widens | `AGENT_PROFIT_TRAIL_ATR`, `AGENT_PROFIT_TRAIL_MIN_PIPS` |
+| Adverse-side cut | Market close once adverse move ≥ min(`AGENT_LOSS_CUT_RISK_PCT`% × R, `AGENT_LOSS_CUT_ATR` × ATR), floored by `AGENT_LOSS_CUT_MIN_PIPS` | `AGENT_LOSS_CUT_RISK_PCT`, `AGENT_LOSS_CUT_ATR`, `AGENT_LOSS_CUT_MIN_PIPS` |
 | Broker emergency SL | 1.5×M1 ATR, min 6 pips / 3× spread | `AGENT_EMERGENCY_SL_ATR`, `AGENT_MIN_STOP_PIPS` |
 | Broker SL update cadence / minimum move | 10 s / 2 pips | `AGENT_BROKER_STOP_UPDATE_MS`, `AGENT_BROKER_STOP_MOVE_MIN_PIPS` |
 | Max chase | 1.5×ATR | `AGENT_MAX_CHASE_ATR` |
@@ -152,7 +153,7 @@ account.
 | Risk per trade | 0.1% target; minimum broker lot may exceed the target only if its actual SL risk fits within remaining aggregate cap | `AGENT_RISK_PCT` |
 | Max lots per trade | 0.5 | `AGENT_MAX_LOTS` |
 | Re-entry trigger | new valid closed candle or favourable move ≥ max(0.2×ATR, 1 pip) | `AGENT_REENTRY_STEP_ATR`, `AGENT_REENTRY_MIN_PIPS` |
-| Same-symbol entries | No fixed per-symbol or total-position count; aggregate risk/margin still cap exposure | executor |
+| Same-symbol entries | Max `AGENT_MAX_OPEN_PER_SYMBOL` per symbol; `AGENT_SYMBOL_COOLDOWN_MS` cooldown after close | executor |
 | Aggregate open-risk cap | 2% of account equity, re-sized to remaining budget | `AGENT_MAX_OPEN_RISK_PCT` |
 | Open risk calculation | Current confirmed broker SL and stored USD pip value; TS VIRT never reduces risk | executor |
 | Daily-loss entry cutoff | 3% of day-start balance | `AGENT_MAX_DAILY_LOSS_PCT` |
@@ -172,15 +173,22 @@ instruments whose M1 ATR is too quiet or too wild.
   stop ratchets only upward; SELL tracks the lowest executable ask and the stop
   ratchets only downward.
 - The first published TS VIRT update happens as soon as the executable side
-  clears entry by the current spread plus the configured buffer. The stop is
-  placed at entry ± that cushion immediately; it does not wait for the wider
-  initial trail distance to be exceeded.
-- After the first profit lock, the trail distance switches to the tighter
-  `max(0.3×ATR, 0.5 pips, 1.1×spread)` target by default and keeps chasing each
-  favorable tick. The distance and stop level never move backwards. When ATR
-  refreshes or volatility expands, the active distance is never widened.
+  clears entry by the current spread plus the configured buffer. **Before** the
+  cushion is published, however, the stop is not pulled to break-even on spread
+  alone: it requires real progress of at least `AGENT_PROFIT_LOCK_ACTIVATE_R` × R
+  (default 0.5R). This prevents the old behaviour where noise closed every
+  winner a fraction of a pip in the green.
+- After the first profit lock, the trail distance is the tighter of
+  `AGENT_PROFIT_TRAIL_ATR` × ATR and a risk-relative fraction of R that relaxes
+  as the trade runs (0.75R → 0.50R → 0.35R); the distance and stop level never
+  move backwards. When ATR refreshes or volatility expands, the active distance
+  is never widened.
 - No fixed USD activation threshold is used. BUY profit lock requires a stop
   above entry; SELL profit lock requires a stop below entry.
+- A losing position that never locked profit is market-closed once the adverse
+  move reaches the tighter of `AGENT_LOSS_CUT_RISK_PCT`% × R and
+  `AGENT_LOSS_CUT_ATR` × ATR (floored by `AGENT_LOSS_CUT_MIN_PIPS`); see the
+  config table. This stops losers running to the full broker emergency SL.
 - A BUY closes when a fresh quote has `bid ≤ TS VIRT`; a SELL closes when a
   fresh quote has `ask ≥ TS VIRT`. The quote is revalidated after ATR/API awaits,
   and stale quotes cannot trigger a TS close.

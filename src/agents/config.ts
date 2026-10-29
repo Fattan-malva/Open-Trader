@@ -67,6 +67,22 @@ export interface AgentConfig {
   profitTrailMinPips: number;
   /** Minimum distance beyond entry before profit-lock is considered secured. */
   profitLockMinPips: number;
+  /**
+   * Peak profit, as a multiple of the planned stop distance (R), required
+   * before the stop is pulled to break-even. 0 restores the old behaviour of
+   * locking at the spread cushion alone, which turned every winner into a
+   * near-scratch.
+   */
+  profitLockActivateR: number;
+  /**
+   * Adverse-side TS: cut a losing position before it reaches the broker
+   * emergency stop. The cut distance is the tighter of
+   * `lossCutRiskPct` of the planned stop distance and `lossCutAtrFactor` × ATR.
+   * 0 disables the cut.
+   */
+  lossCutRiskPct: number;
+  lossCutAtrFactor: number;
+  lossCutMinPips: number;
   stopEnsureRetryMs: number;
 
   maxQuoteAgeMs: number;
@@ -76,6 +92,13 @@ export interface AgentConfig {
   reentryStepAtr: number;
   /** Minimum re-entry price step, even when ATR is unusually small. */
   reentryMinPips: number;
+  /**
+   * Maximum simultaneously open positions on one symbol. 1 prevents stacking
+   * the same setup over and over (the 2026-10-29 book had 11 XAUUSD SELLs).
+   */
+  maxOpenPerSymbol: number;
+  /** Quiet period after a symbol closes before it may be re-entered. */
+  symbolCooldownMs: number;
 }
 
 function num(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
@@ -153,8 +176,12 @@ export function loadAgentConfig(
     trailMinPips: num(env, "AGENT_TRAIL_MIN_PIPS", 4),
     
     profitLockMinPips: Math.max(0, num(env, "AGENT_PROFIT_LOCK_MIN_PIPS", 0.5)),
+    profitLockActivateR: Math.max(0, num(env, "AGENT_PROFIT_LOCK_ACTIVATE_R", 0.5)),
     profitTrailAtrFactor: Math.max(0.05, num(env, "AGENT_PROFIT_TRAIL_ATR", 0.25)),
     profitTrailMinPips: Math.max(0.1, num(env, "AGENT_PROFIT_TRAIL_MIN_PIPS", 0.3)),
+    lossCutRiskPct: Math.max(0, num(env, "AGENT_LOSS_CUT_RISK_PCT", 35)),
+    lossCutAtrFactor: Math.max(0, num(env, "AGENT_LOSS_CUT_ATR", 0.8)),
+    lossCutMinPips: Math.max(0.1, num(env, "AGENT_LOSS_CUT_MIN_PIPS", 2)),
     brokerStopUpdateMs: Math.max(1000, num(env, "AGENT_BROKER_STOP_UPDATE_MS", 10000)),
     brokerStopMoveMinPips: Math.max(0.1, num(env, "AGENT_BROKER_STOP_MOVE_MIN_PIPS", 2)),
     stopEnsureRetryMs: num(env, "AGENT_STOP_RETRY_MS", 15000),
@@ -163,6 +190,8 @@ export function loadAgentConfig(
     maxChaseAtr: num(env, "AGENT_MAX_CHASE_ATR", 1.5),
     reentryStepAtr: Math.max(0.01, num(env, "AGENT_REENTRY_STEP_ATR", 0.2)),
     reentryMinPips: Math.max(0.1, num(env, "AGENT_REENTRY_MIN_PIPS", 1)),
+    maxOpenPerSymbol: Math.max(1, Math.trunc(num(env, "AGENT_MAX_OPEN_PER_SYMBOL", 1))),
+    symbolCooldownMs: Math.max(0, num(env, "AGENT_SYMBOL_COOLDOWN_MS", 5 * 60 * 1000)),
   };
 
   return { ...defaults, ...overrides };

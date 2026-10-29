@@ -16,6 +16,7 @@ import type { Candidate, ScanDiagnostics } from "./screener.js";
 import { Screener, screenerOptionsFrom } from "./screener.js";
 import type { ExecutorState, RealizedStats, RiskExecutor, TradeLogEntry } from "./risk-and-executor.js";
 import { shouldOpenReentry, type EntryTriggerState } from "./reentry.js";
+import { lockedProfitDistance } from "./trailing.js";
 
 const SCAN_GRACE_MS = 2_000;
 
@@ -77,6 +78,8 @@ export interface AgentStateFile {
     trailDistance: number;
     atr: number;
     score: number;
+    /** USD profit secured once the virtual trail locked beyond entry. */
+    lockedProfitUsd: number;
   }>;
   stats: RealizedStats & { winRate: number };
   dailyPnl: number;
@@ -634,19 +637,28 @@ export class AgentEngine {
           }
         : null,
       trailing: trailing.slice(-8),
-      openPositions: [...this.deps.executor.managed.values()].map((position) => ({
-        positionId: position.positionId,
-        symbol: position.symbol,
-        side: position.side,
-        volume: position.volume,
-        entry: position.entry,
-        sl: position.emergencySl,
-        trail: position.trailStop,
-        best: position.best,
-        trailDistance: position.trailDistance,
-        atr: position.atr,
-        score: position.score,
-      })),
+      openPositions: [...this.deps.executor.managed.values()].map((position) => {
+        // Only a stop beyond entry has secured anything. A stop still on the
+        // loss side must report 0, never a positive "locked" amount.
+        const lockedDistance = lockedProfitDistance(position.side, position.trailStop, position.entry);
+        const lockedProfitUsd = position.pipValueUsdPerLot && lockedDistance > 0
+          ? (lockedDistance / position.pip) * position.volume * position.pipValueUsdPerLot
+          : 0;
+        return {
+          positionId: position.positionId,
+          symbol: position.symbol,
+          side: position.side,
+          volume: position.volume,
+          entry: position.entry,
+          sl: position.emergencySl,
+          trail: position.trailStop,
+          best: position.best,
+          trailDistance: position.trailDistance,
+          atr: position.atr,
+          score: position.score,
+          lockedProfitUsd: Number(lockedProfitUsd.toFixed(2)),
+        };
+      }),
       stats: {
         ...stats,
         winRate: decided > 0 ? (stats.wins / decided) * 100 : 0,

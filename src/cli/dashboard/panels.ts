@@ -306,16 +306,19 @@ export function renderPositionsTable(
       const trail = Number(managed?.trail);
       const virtualTrail = Number.isFinite(trail) && trail > 0 ? trail : null;
       const pnlUsd = positionPnlUsd(pos, ticks);
-      return { pos, digits, now, pips, sl, virtualTrail, pnlUsd };
+      const lockedProfitUsd = Number(managed?.lockedProfitUsd ?? 0);
+      return { pos, digits, now, pips, sl, virtualTrail, pnlUsd, lockedProfitUsd };
     })
     .sort((a, b) => b.pnlUsd - a.pnlUsd);
 
   const start = Math.max(0, scrollOffset);
   const visible = enriched.slice(start, start + limit);
 
-  const rows = visible.map(({ pos, digits, now, sl, virtualTrail, pnlUsd }) => {
+  const rows = visible.map(({ pos, digits, now, sl, virtualTrail, pnlUsd, lockedProfitUsd }) => {
     const pnlCell =
       pnlUsd >= 0 ? style.green(`$${pnlUsd.toFixed(2)}`) : style.red(`$${pnlUsd.toFixed(2)}`);
+    const lockCell =
+      lockedProfitUsd > 0 ? style.green(`+$${lockedProfitUsd.toFixed(2)}`) : style.dim(`$${lockedProfitUsd.toFixed(2)}`);
     const slCell = sl !== null ? formatNumber(sl, digits) : style.dim("—");
     const tsCell =
       virtualTrail === null
@@ -334,6 +337,7 @@ export function renderPositionsTable(
         tsCell,
         slCell,
         pnlCell,
+        lockCell,
       ];
     }
     if (mid) {
@@ -345,6 +349,7 @@ export function renderPositionsTable(
         now !== undefined ? formatNumber(now, digits) : style.dim("—"),
         tsCell,
         pnlCell,
+        lockCell,
       ];
     }
     if (slim) {
@@ -354,18 +359,19 @@ export function renderPositionsTable(
         now !== undefined ? formatNumber(now, digits) : style.dim("—"),
         tsCell,
         pnlCell,
+        lockCell,
       ];
     }
-    return [style.bold(pos.instrument), sideLabel(pos.direction), tsCell, pnlCell];
+    return [style.bold(pos.instrument), sideLabel(pos.direction), tsCell, pnlCell, lockCell];
   });
 
   const headers = wide
-    ? ["SYMBOL", "SIDE", "LOT", "ENTRY", "NOW", "TS VIRT", "SL", "PNL $"]
+    ? ["SYMBOL", "SIDE", "LOT", "ENTRY", "NOW", "TS VIRT", "SL", "PNL $", "LOCK $"]
     : mid
-      ? ["SYMBOL", "SIDE", "LOT", "ENTRY", "NOW", "TS VIRT", "PNL $"]
+      ? ["SYMBOL", "SIDE", "LOT", "ENTRY", "NOW", "TS VIRT", "PNL $", "LOCK $"]
       : slim
-        ? ["SYMBOL", "SIDE", "NOW", "TS VIRT", "PNL $"]
-        : ["SYMBOL", "SIDE", "TS VIRT", "PNL $"];
+        ? ["SYMBOL", "SIDE", "NOW", "TS VIRT", "PNL $", "LOCK $"]
+        : ["SYMBOL", "SIDE", "TS VIRT", "PNL $", "LOCK $"];
   const align: Record<number, "right"> = {};
   headers.forEach((_, index) => {
     if (index >= 2) align[index] = "right";
@@ -623,6 +629,8 @@ export interface AgentStateFile {
     trailDistance?: number;
     atr?: number;
     score?: number;
+    /** USD profit secured once the virtual trail locked beyond entry. */
+    lockedProfitUsd?: number;
   }>;
   stats?: {
     trades?: number;
