@@ -19,6 +19,7 @@ import type { AgentJournal, AgentTone } from "./journal.js";
 import { spreadWithinLimit } from "./spread.js";
 import {
   advanceVirtualStop,
+  canMoveTrailStop,
   initialVirtualStop,
   profitLockActivationThreshold,
   trailDistanceFromAtr,
@@ -848,9 +849,18 @@ export class RiskExecutor {
         await this.refreshTrailDistance(managed);
       }
 
-      // The virtual stop follows the best executable price continuously.
-      // It advances even before it crosses entry, shrinking risk without any
-      // fixed USD activation threshold.
+      // Never trigger TS or update it using a cached quote that is no longer
+      // current. The broker-side emergency SL remains active while feed data
+      // is stale; a fresh executable quote is required for a TS close decision.
+      if (
+        now - quote.timestamp > this.deps.config.maxQuoteAgeMs ||
+        quote.timestamp - now > 1_000
+      ) {
+        continue;
+      }
+
+      // The first published TS VIRT move is held until it already locks profit.
+      // Thereafter it may only ratchet farther into profit.
       const previousBest = managed.best;
       managed.best = updateBest(managed.side, managed.best, quote.bid, quote.ask);
       if (managed.best !== previousBest) {
@@ -967,6 +977,16 @@ export class RiskExecutor {
       factor;
     const epsilon = managed.pip / 100;
     if (!improved(managed.side, rounded, managed.trailStop, epsilon)) return;
+    if (
+      !canMoveTrailStop(
+        managed.side,
+        rounded,
+        managed.entry,
+        Boolean(managed.trailActivated),
+      )
+    ) {
+      return;
+    }
 
     const previousStop = managed.trailStop;
     managed.trailStop = rounded;
