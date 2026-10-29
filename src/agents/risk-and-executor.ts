@@ -619,7 +619,10 @@ export class RiskExecutor {
         this.deps.config.trailMinPips * pip,
       );
       const emergency = Number(entry.sl) || brokerSl || entry.price - sign * riskDistance;
-      const trailStop = brokerSl > 0 ? brokerSl : emergency;
+      const initialStop = initialVirtualStop(side, entry.price, trailDistance);
+      const trailStop = brokerSl > 0
+        ? (side === "buy" ? Math.max(initialStop, brokerSl) : Math.min(initialStop, brokerSl))
+        : initialStop;
 
       const managed: ManagedPosition = {
         positionId: position.position_id,
@@ -636,6 +639,10 @@ export class RiskExecutor {
         trailDistance,
         best: entry.price,
         atr: approxAtr,
+        trailActivated: side === "buy" ? trailStop >= entry.price : trailStop <= entry.price,
+        riskUsd: Number(entry.riskUsd) > 0 ? Number(entry.riskUsd) : undefined,
+        lastBrokerStopMoveAt: 0,
+        lastValuationAttemptAt: 0,
         openedAt: Date.parse(position.create_time) || entry.at,
         lastAtrSyncAt: 0,
         lastStopEnsureAt: 0,
@@ -741,7 +748,11 @@ export class RiskExecutor {
       if (sltp?.order_id) {
         managed.slOrderId = sltp.order_id;
         const brokerSl = Number(sltp.stop_loss_price ?? 0);
-        if (brokerSl > 0 && brokerSl !== managed.emergencySl) {
+        if (
+          brokerSl > 0 &&
+          (!(managed.emergencySl > 0) ||
+            (managed.side === "buy" ? brokerSl > managed.emergencySl : brokerSl < managed.emergencySl))
+        ) {
           managed.emergencySl = brokerSl;
         }
       } else if (
@@ -760,15 +771,129 @@ export class RiskExecutor {
         await this.refreshTrailDistance(managed);
       }
 
+      await this.ensureProfitValuation(managed);
+      const closePrice = managed.side === "buy" ? quote.bid : quote.ask;
+      const favorableMove = managed.side === "buy"
+        ? closePrice - managed.entry
+        : managed.entry - closePrice;
+      const estimatedProfitUsd = Math.max(0, favorableMove) *
+        Math.max(0, managed.profitPerPriceUnitUsd ?? 0);
+      const activatedNow = !managed.trailActivated &&
+        estimatedProfitUsd >= this.deps.config.trailProfitActivationUsd;
+      if (activatedNow) {
+        managed.trailActivated = true;
+        this.log({
+          at: now,
+          action: "protect",
+          symbol: managed.symbol,
+          positionId: managed.positionId,
+          side: managed.side,
+          price: closePrice,
+          reason: `profit-lock activated · gross estimated +${estimatedProfitUsd.toFixed(2)} USD`,
+          ok: true,
+        });
+      }
+
       const previousBest = managed.best;
       managed.best = updateBest(managed.side, managed.best, quote.bid, quote.ask);
-      if (managed.best !== previousBest) {
-        this.advanceStop(managed, "best update");
+      if (managed.best !== previousBest || activatedNow) {
+        this.advanceStop(managed, activatedNow
+          ? `profit trigger +${estimatedProfitUsd.toFixed(2)} USD`
+          : "best update");
       }
 
       if (!managed.closing && virtualStopHit(managed.side, managed.trailStop, quote.bid, quote.ask)) {
         await this.closeFull(managed, this.triggerReason(managed, quote));
+      } else if (managed.trailActivated) {
+        await this.tightenEmergencyStop(managed, quote);
       }
+    }
+  }
+
+  /** Reconstruct valuation for positions restored from older state files. */
+  private async ensureProfitValuation(managed: ManagedPosition): Promise<void> {
+    if (Number(managed.profitPerPriceUnitUsd) > 0) return;
+    const now = Date.now();
+    if (now - (managed.lastValuationAttemptAt ?? 0) < 60_000) return;
+    managed.lastValuationAttemptAt = now;
+    try {
+      const conditions = await this.deps.tools.conditions(managed.symbol);
+      const contractSize = parseNumber(conditions.contract_size, 0);
+      const quoteCurrency = (conditions.quote_currency ?? managed.symbol.slice(3)).toUpperCase();
+      let quotes = new Map(this.deps.ticks.store.all().map((entry) => [entry.symbol, entry] as const));
+      let quoteRate = quoteToUsdRate(quoteCurrency, quotes);
+      if (quoteRate === undefined && quoteCurrency !== "USD") {
+        await this.deps.ticks.ensure([`${quoteCurrency}USD`, `USD${quoteCurrency}`], 1500).catch(() => []);
+        quotes = new Map(this.deps.ticks.store.all().map((entry) => [entry.symbol, entry] as const));
+        quoteRate = quoteToUsdRate(quoteCurrency, quotes);
+      }
+      if (contractSize > 0 && quoteRate && quoteRate > 0 && managed.volume > 0) {
+        managed.profitPerPriceUnitUsd = contractSize * quoteRate * managed.volume;
+      }
+    } catch {
+      // Keep profit-lock trailing inactive until a trustworthy valuation is available.
+    }
+  }
+
+  /** Move broker emergency SL only in the protective direction after profit lock. */
+  private async tightenEmergencyStop(managed: ManagedPosition, quote: Quote): Promise<void> {
+    if (!managed.trailActivated || !managed.slOrderId || managed.closing || this.busy.has(managed.positionId)) {
+      return;
+    }
+    const now = Date.now();
+    if (now - (managed.lastBrokerStopMoveAt ?? 0) < this.deps.config.brokerStopUpdateMs) return;
+
+    const minimumMarketGap = this.deps.config.minStopPips * managed.pip;
+    const raw = managed.side === "buy"
+      ? Math.min(managed.trailStop, quote.bid - minimumMarketGap)
+      : Math.max(managed.trailStop, quote.ask + minimumMarketGap);
+    const target = roundStopAway(raw, managed.digits, managed.side);
+    const epsilon = this.deps.config.brokerStopMoveMinPips * managed.pip;
+    if (!Number.isFinite(target) || !improved(managed.side, target, managed.emergencySl, epsilon)) return;
+    if (managed.side === "buy" && target >= quote.bid) return;
+    if (managed.side === "sell" && target <= quote.ask) return;
+
+    this.busy.add(managed.positionId);
+    managed.lastBrokerStopMoveAt = now;
+    try {
+      const result = await this.deps.tools.setSltp(managed.positionId, target, managed.digits);
+      if (!result.ok) {
+        this.log({
+          at: Date.now(),
+          action: "error",
+          symbol: managed.symbol,
+          positionId: managed.positionId,
+          sl: target,
+          reason: `broker SL tighten rejected: ${result.errorMessage ?? result.status}`,
+          ok: false,
+        });
+        return;
+      }
+      managed.emergencySl = target;
+      const order = result.data?.orders?.find((item) => item.order_type === "sltp");
+      if (order?.order_id) managed.slOrderId = order.order_id;
+      this.log({
+        at: Date.now(),
+        action: "protect",
+        symbol: managed.symbol,
+        positionId: managed.positionId,
+        side: managed.side,
+        sl: target,
+        reason: "broker emergency SL tightened to protect profit",
+        ok: true,
+      });
+      this.deps.tools.invalidateSnapshot();
+    } catch (error) {
+      this.log({
+        at: Date.now(),
+        action: "error",
+        symbol: managed.symbol,
+        positionId: managed.positionId,
+        reason: `broker SL tighten error: ${error instanceof Error ? error.message : String(error)}`,
+        ok: false,
+      });
+    } finally {
+      this.busy.delete(managed.positionId);
     }
   }
 
@@ -778,13 +903,21 @@ export class RiskExecutor {
   }
 
   private advanceStop(managed: ManagedPosition, why: string): void {
-    if (managed.closing) return;
-    const next = advanceVirtualStop(
+    if (managed.closing || !managed.trailActivated) return;
+    let next = advanceVirtualStop(
       managed.side,
       managed.trailStop,
       managed.best,
       managed.trailDistance,
     );
+    const valuePerPriceUnit = Number(managed.profitPerPriceUnitUsd);
+    if (Number.isFinite(valuePerPriceUnit) && valuePerPriceUnit > 0) {
+      const lockDistance = this.deps.config.trailProfitLockUsd / valuePerPriceUnit;
+      const lockStop = managed.side === "buy"
+        ? managed.entry + lockDistance
+        : managed.entry - lockDistance;
+      next = managed.side === "buy" ? Math.max(next, lockStop) : Math.min(next, lockStop);
+    }
     if (!Number.isFinite(next)) return;
     // A stop must never be pulled closer than the intended distance just
     // because of display rounding: floor a BUY stop, ceil a SELL stop.
