@@ -63,3 +63,12 @@ test("normal in-cap spread is accepted while a symbol has no baseline", () => {
   assert.equal(assessment.ok, true);
   assert.equal(assessment.baseline, undefined);
 });
+
+test("metal-specific spread cap can be wider than the generic non-FX cap", () => {
+  const assessment = assessSpread(
+    "XPTUSD",
+    quote("XPTUSD", 50_000, 0.1, 100, 0.1),
+    { ...limits, maxMetalSpreadPct: 0.12 },
+  );
+  assert.equal(assessment.ok, true);
+});
