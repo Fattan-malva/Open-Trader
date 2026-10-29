@@ -830,7 +830,7 @@ function conciseAgentMessage(entry: AgentActivity): string {
     if (/trail|TS VIRTUAL hit/i.test(message)) {
       return trail
         ? `TS ${symbol ?? "?"} → ${trail[1]}`
-        : pips ? `TS ${symbol ?? "?"} ${pips[1]}p` : `TS ${symbol ?? "?"} moved`;
+        : pips ? `TS ${symbol ?? "?"} dist ${pips[1]}p` : `TS ${symbol ?? "?"} moved`;
     }
     if (/emergency SL tightened/i.test(message)) {
       const sl = message.match(/sl[: =]+([0-9.]+)/i);
@@ -990,15 +990,24 @@ export function renderAgentLogLines(
     return [style.dim("  belum ada aktivitas agent · jalankan `npm start`")];
   }
   const lines = activity.map((entry) => {
-    const text =
-      entry.tone === "error"
-        ? style.red(entry.message)
+    // Closed P/L color follows the realized amount, not the generic log tone.
+    const closePnl = entry.agent === "trader"
+      ? message.match(/^CLOSE\s+\S+\s+([+-]?\d+(?:\.\d+)?)$/i)
+      : null;
+    const text = closePnl
+      ? Number(closePnl[1]) < 0
+        ? style.red(message)
+        : Number(closePnl[1]) > 0
+          ? style.green(message)
+          : style.dim(message)
+      : entry.tone === "error"
+        ? style.red(message)
         : entry.tone === "warn"
-          ? style.yellow(entry.message)
+          ? style.yellow(message)
           : entry.tone === "success"
-            ? style.green(entry.message)
-            : entry.message;
-    return `  ${style.dim(shortClock(entry.at))}  ${agentTag(entry.agent)}  ${text}`;
+            ? style.green(message)
+            : style.dim(message);
+    return `${style.dim(shortClock(entry.at))} ${text}`;
   });
   if (!agent?.running) {
     lines.push(style.yellow("  agent idle · jalankan `npm start` di terminal ini"));
