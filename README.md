@@ -189,6 +189,10 @@ instruments whose M1 ATR is too quiet or too wild.
   move reaches the tighter of `AGENT_LOSS_CUT_RISK_PCT`% × R and
   `AGENT_LOSS_CUT_ATR` × ATR (floored by `AGENT_LOSS_CUT_MIN_PIPS`); see the
   config table. This stops losers running to the full broker emergency SL.
+- Only one position per symbol is allowed (`AGENT_MAX_OPEN_PER_SYMBOL`,
+  default 1) and a `AGENT_SYMBOL_COOLDOWN_MS` quiet period (default 5 min)
+  applies after a close before the same symbol may be re-entered. This prevents
+  the stacked same-symbol pyramiding seen in the realized book.
 - A BUY closes when a fresh quote has `bid ≤ TS VIRT`; a SELL closes when a
   fresh quote has `ask ≥ TS VIRT`. The quote is revalidated after ATR/API awaits,
   and stale quotes cannot trigger a TS close.
