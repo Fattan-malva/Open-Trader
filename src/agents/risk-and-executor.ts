@@ -23,6 +23,7 @@ import {
   profitLockActivationThreshold,
   trailDistanceFromAtr,
   updateBest,
+  virtualStopLocksProfit,
   virtualStopHit,
   type PositionSide,
 } from "./trailing.js";
@@ -47,12 +48,9 @@ export interface ManagedPosition {
   best: number;
   atr: number;
   trailActivated?: boolean;
-  /** Estimated USD value of a 1.0 price-unit move. */
-  profitPerPriceUnitUsd?: number;
   /** Initial stop risk in USD for aggregate account-risk checks. */
   riskUsd?: number;
   lastBrokerStopMoveAt?: number;
-  lastValuationAttemptAt?: number;
 
   openedAt: number;
   /** boundary of the last trail ATR refresh */
@@ -282,8 +280,7 @@ export class RiskExecutor {
         ? (side === "buy" ? Math.max(initialStop, savedStop) : Math.min(initialStop, savedStop))
         : initialStop;
       const savedRiskUsd = Number(position.riskUsd);
-      const savedProfitPerPriceUnitUsd = Number(position.profitPerPriceUnitUsd);
-      const wasAlreadyProtected = side === "buy" ? trailStop >= entry : trailStop <= entry;
+      const wasAlreadyProtected = virtualStopLocksProfit(side, trailStop, entry);
 
       this.managed.set(position.positionId, {
         positionId: position.positionId,
@@ -303,10 +300,8 @@ export class RiskExecutor {
         trailActivated: typeof position.trailActivated === "boolean"
           ? position.trailActivated
           : wasAlreadyProtected,
-        profitPerPriceUnitUsd: savedProfitPerPriceUnitUsd > 0 ? savedProfitPerPriceUnitUsd : undefined,
         riskUsd: savedRiskUsd > 0 ? savedRiskUsd : undefined,
         lastBrokerStopMoveAt: 0,
-        lastValuationAttemptAt: 0,
         openedAt: Number(position.openedAt) || Date.now(),
         // Force a fresh trail ATR read on the first manage tick after a restart.
         lastAtrSyncAt: 0,
@@ -577,11 +572,9 @@ export class RiskExecutor {
       best: signal.side === "buy" ? Math.max(entry, quote.bid) : Math.min(entry, quote.ask),
       atr: signal.atr,
       trailActivated: false,
-      profitPerPriceUnitUsd: contractSize * quoteRate * (Number(position.volume) > 0 ? Number(position.volume) : finalLots),
       riskUsd: (Number(position.volume) > 0 ? Number(position.volume) : finalLots) *
         (Math.abs(entry - emergencySl) / pip) * pipValuePerLot,
       lastBrokerStopMoveAt: 0,
-      lastValuationAttemptAt: 0,
       openedAt: Date.now(),
       lastAtrSyncAt: candleBoundary(this.deps.config.trailTimeframe),
       lastStopEnsureAt: sltp?.order_id ? Date.now() : 0,
@@ -677,10 +670,9 @@ export class RiskExecutor {
         trailDistance,
         best: entry.price,
         atr: approxAtr,
-        trailActivated: side === "buy" ? trailStop >= entry.price : trailStop <= entry.price,
+        trailActivated: virtualStopLocksProfit(side, trailStop, entry.price),
         riskUsd: Number(entry.riskUsd) > 0 ? Number(entry.riskUsd) : undefined,
         lastBrokerStopMoveAt: 0,
-        lastValuationAttemptAt: 0,
         openedAt: Date.parse(position.create_time) || entry.at,
         lastAtrSyncAt: 0,
         lastStopEnsureAt: 0,
@@ -809,17 +801,19 @@ export class RiskExecutor {
         await this.refreshTrailDistance(managed);
       }
 
-      // Valuation may need a conversion quote; never block stop-hit checks on that I/O.
-      void this.ensureProfitValuation(managed);
-      const closePrice = managed.side === "buy" ? quote.bid : quote.ask;
-      const favorableMove = managed.side === "buy"
-        ? closePrice - managed.entry
-        : managed.entry - closePrice;
-      const estimatedProfitUsd = Math.max(0, favorableMove) *
-        Math.max(0, managed.profitPerPriceUnitUsd ?? 0);
-      const lockActivationUsd = profitLockActivationThreshold(this.deps.config.trailProfitLockUsd);
+      // The virtual stop follows the best executable price continuously.
+      // It advances even before it crosses entry, shrinking risk without any
+      // fixed USD activation threshold.
+      const previousBest = managed.best;
+      managed.best = updateBest(managed.side, managed.best, quote.bid, quote.ask);
+      if (managed.best !== previousBest) {
+        this.advanceStop(managed, "best update");
+      }
+
+      // Profit protection becomes active when TS VIRT itself crosses entry.
+      // Once activated, that state stays true and the stop never backs off.
       const activatedNow = !managed.trailActivated &&
-        estimatedProfitUsd >= lockActivationUsd;
+        virtualStopLocksProfit(managed.side, managed.trailStop, managed.entry);
       if (activatedNow) {
         managed.trailActivated = true;
         this.log({
@@ -828,18 +822,10 @@ export class RiskExecutor {
           symbol: managed.symbol,
           positionId: managed.positionId,
           side: managed.side,
-          price: closePrice,
-          reason: `profit-lock activated · gross +${estimatedProfitUsd.toFixed(2)} USD (threshold ${lockActivationUsd.toFixed(2)})`,
+          price: managed.trailStop,
+          reason: `TS VIRT crossed entry ${managed.entry.toFixed(managed.digits)} · profit lock armed`,
           ok: true,
         });
-      }
-
-      const previousBest = managed.best;
-      managed.best = updateBest(managed.side, managed.best, quote.bid, quote.ask);
-      if (managed.best !== previousBest || activatedNow) {
-        this.advanceStop(managed, activatedNow
-          ? `profit trigger +${estimatedProfitUsd.toFixed(2)} USD`
-          : "best update");
       }
 
       if (!managed.closing && virtualStopHit(managed.side, managed.trailStop, quote.bid, quote.ask)) {
@@ -847,32 +833,6 @@ export class RiskExecutor {
       } else if (managed.trailActivated) {
         await this.tightenEmergencyStop(managed, quote);
       }
-    }
-  }
-
-  /** Reconstruct valuation for positions restored from older state files. */
-  private async ensureProfitValuation(managed: ManagedPosition): Promise<void> {
-    if (Number(managed.profitPerPriceUnitUsd) > 0) return;
-    const now = Date.now();
-    // Retry transient valuation/conversion failures quickly; do not leave a restored position unprotected for a full minute.
-    if (now - (managed.lastValuationAttemptAt ?? 0) < 5_000) return;
-    managed.lastValuationAttemptAt = now;
-    try {
-      const conditions = await this.deps.tools.conditions(managed.symbol);
-      const contractSize = parseNumber(conditions.contract_size, 0);
-      const quoteCurrency = (conditions.quote_currency ?? managed.symbol.slice(3)).toUpperCase();
-      let quotes = new Map(this.deps.ticks.store.all().map((entry) => [entry.symbol, entry] as const));
-      let quoteRate = quoteToUsdRate(quoteCurrency, quotes);
-      if (quoteRate === undefined && quoteCurrency !== "USD") {
-        await this.deps.ticks.ensure([`${quoteCurrency}USD`, `USD${quoteCurrency}`], 1500).catch(() => []);
-        quotes = new Map(this.deps.ticks.store.all().map((entry) => [entry.symbol, entry] as const));
-        quoteRate = quoteToUsdRate(quoteCurrency, quotes);
-      }
-      if (contractSize > 0 && quoteRate && quoteRate > 0 && managed.volume > 0) {
-        managed.profitPerPriceUnitUsd = contractSize * quoteRate * managed.volume;
-      }
-    } catch {
-      // Keep profit-lock trailing inactive until a trustworthy valuation is available.
     }
   }
 
@@ -944,21 +904,13 @@ export class RiskExecutor {
   }
 
   private advanceStop(managed: ManagedPosition, why: string): void {
-    if (managed.closing || !managed.trailActivated) return;
+    if (managed.closing) return;
     let next = advanceVirtualStop(
       managed.side,
       managed.trailStop,
       managed.best,
       managed.trailDistance,
     );
-    const valuePerPriceUnit = Number(managed.profitPerPriceUnitUsd);
-    if (Number.isFinite(valuePerPriceUnit) && valuePerPriceUnit > 0) {
-      const lockDistance = this.deps.config.trailProfitLockUsd / valuePerPriceUnit;
-      const lockStop = managed.side === "buy"
-        ? managed.entry + lockDistance
-        : managed.entry - lockDistance;
-      next = managed.side === "buy" ? Math.max(next, lockStop) : Math.min(next, lockStop);
-    }
     if (!Number.isFinite(next)) return;
     // A stop must never be pulled closer than the intended distance just
     // because of display rounding: floor a BUY stop, ceil a SELL stop.
