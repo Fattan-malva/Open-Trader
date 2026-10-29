@@ -402,12 +402,24 @@ export class RiskExecutor {
     const pip = pipSize(signal.symbol, digits);
     // Round the emergency stop with the broker's real precision, away from the
     // entry. This is the exact value sent in the order and shown on the board.
-    const emergencySl = roundStopAway(signal.emergencySl, digits, signal.side);
+    const stopSign = signal.side === "buy" ? 1 : -1;
+    // Re-anchor the emergency SL to the executable price at order time. A
+    // signal can wait behind REST/API work, so never size against a stale stop.
+    const emergencyDistance = Math.max(
+      this.deps.config.emergencySlAtrFactor * signal.atr,
+      this.deps.config.minStopPips * pip,
+      quote.spread * 3,
+    );
+    const emergencySl = roundStopAway(
+      execution - stopSign * emergencyDistance,
+      digits,
+      signal.side,
+    );
     if (
       (signal.side === "buy" && emergencySl >= execution) ||
       (signal.side === "sell" && emergencySl <= execution)
     ) {
-      return { ok: false, reason: "emergency SL is no longer on the protective side of the current price" };
+      return { ok: false, reason: "emergency SL is not on the protective side of the current price" };
     }
     const contractSize = parseNumber(conditions.contract_size, 100_000);
     const volumeMin = parseNumber(conditions.volume_min, 0.01);
