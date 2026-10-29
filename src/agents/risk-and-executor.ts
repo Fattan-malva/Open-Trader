@@ -414,7 +414,7 @@ export class RiskExecutor {
       const orderStop = Number(sltp?.stop_loss_price ?? 0);
       // emergencySl is the last confirmed broker SL sent with the position or
       // acknowledged by a later SL modification; it is not the virtual trail.
-      const brokerStop = positionStop > 0 ? positionStop : orderStop > 0 ? orderStop : managed.emergencySl;
+      const brokerStop = orderStop > 0 ? orderStop : positionStop > 0 ? positionStop : managed.emergencySl;
       const pipValue = Number(managed.pipValueUsdPerLot);
       const volume = parseNumber(position?.volume, managed.volume);
       const entry = parseNumber(position?.open_price, managed.entry);
