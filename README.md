@@ -36,8 +36,11 @@ every 2 s ──► fast screener (M5 trend + cached M1 pullback/breakout + adap
 - **Risk** sizes from current account balance/equity (converted to USD for
   sizing), validates actual account leverage, caps volume by available free
   margin while reserving a buffer, and enforces aggregate open-risk and
-  daily-loss limits. Valid setups can add repeated entries on the same symbol;
-  no fixed total-position count is imposed. It opens a market order with a
+  daily-loss limits. If the target lot rounds below broker minimum, the executor
+  can use the broker minimum only when its real stop-loss risk fits the remaining
+  aggregate open-risk budget; otherwise it records the exact risk/minimum-lot reason.
+  Valid setups can add repeated entries on the same symbol; no fixed total-position
+  count is imposed. It opens a market order with a
   **broker emergency stop-loss**
   and never sends a take-profit.
 - **Trader** starts TS VIRT from the actual fill and fast-ATR distance rather
@@ -139,7 +142,7 @@ account.
 | Max chase | 1.5×ATR | `AGENT_MAX_CHASE_ATR` |
 | Max quote age | 8 s | `AGENT_MAX_QUOTE_AGE_MS` |
 | Sizing equity | min(actual balance, equity), converted to USD | account snapshot + market quotes |
-| Risk per trade | 0.1% of actual account capital | `AGENT_RISK_PCT` |
+| Risk per trade | 0.1% target; minimum broker lot may exceed the target only if its actual SL risk fits within remaining aggregate cap | `AGENT_RISK_PCT` |
 | Max lots per trade | 0.5 | `AGENT_MAX_LOTS` |
 | Re-entry trigger | new valid closed candle or favourable move ≥ max(0.2×ATR, 1 pip) | `AGENT_REENTRY_STEP_ATR`, `AGENT_REENTRY_MIN_PIPS` |
 | Same-symbol entries | No fixed per-symbol or total-position count; aggregate risk/margin still cap exposure | executor |
