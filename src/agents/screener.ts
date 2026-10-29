@@ -86,7 +86,13 @@ interface MomentumSample {
   mid: number;
 }
 
+interface ActivityBin {
+  second: number;
+  ticks: number;
+}
+
 const MOMENTUM_WINDOW_MS = 15 * 60_000;
+const ACTIVITY_WINDOW_MS = 60_000;
 const SAMPLE_INTERVAL_MS = 1_000;
 
 /**
@@ -95,8 +101,22 @@ const SAMPLE_INTERVAL_MS = 1_000;
  */
 export class MomentumTracker {
   private readonly samples = new Map<string, MomentumSample[]>();
+  private readonly activity = new Map<string, ActivityBin[]>();
 
   observe(quote: Quote): void {
+    const activity = this.activity.get(quote.symbol) ?? [];
+    const second = Math.floor(quote.timestamp / 1_000) * 1_000;
+    const latestBin = activity[activity.length - 1];
+    if (latestBin && latestBin.second === second) {
+      latestBin.ticks += 1;
+    } else {
+      activity.push({ second, ticks: 1 });
+    }
+    const activityCutoff = quote.timestamp - ACTIVITY_WINDOW_MS;
+    while (activity.length > 0 && activity[0]!.second < activityCutoff) activity.shift();
+    while (activity.length > 60) activity.shift();
+    this.activity.set(quote.symbol, activity);
+
     const series = this.samples.get(quote.symbol) ?? [];
     const last = series[series.length - 1];
     if (last && quote.timestamp >= last.t && quote.timestamp - last.t < SAMPLE_INTERVAL_MS) {
@@ -107,6 +127,15 @@ export class MomentumTracker {
     const cutoff = quote.timestamp - MOMENTUM_WINDOW_MS;
     while (series.length > 1 && series[0]!.t < cutoff) series.shift();
     this.samples.set(quote.symbol, series);
+  }
+
+  /** Number of ticks seen for a symbol during the trailing 60-second window. */
+  ticksLastMinute(symbol: string, now = Date.now()): number {
+    const cutoff = now - ACTIVITY_WINDOW_MS;
+    return (this.activity.get(symbol) ?? []).reduce(
+      (sum, sample) => sum + (sample.second >= cutoff && sample.second <= now + 1_000 ? sample.ticks : 0),
+      0,
+    );
   }
 
   changePct(symbol: string, minutes: number): number | null {
@@ -392,7 +421,7 @@ export class Screener {
       }
 
       const mom5 = this.momentum.changePct(symbol, 5);
-      const activity = clamp(quote.ticks / 20, 0, 1);
+      const activity = clamp(this.momentum.ticksLastMinute(symbol, now) / 120, 0, 1);
       const move = mom5 === null ? 0.35 : clamp(Math.abs(mom5) / 0.08, 0, 1);
       // Rank active and moving symbols without allowing spread quality to
       // dominate the shortlist before technical setup scoring.
