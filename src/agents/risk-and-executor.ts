@@ -837,9 +837,11 @@ export class RiskExecutor {
 
     const previousBest = managed.best;
     managed.best = updateBest(managed.side, managed.best, quote.bid, quote.ask);
-    if (managed.best !== previousBest) {
-      this.advanceStop(managed, "best update", quote);
-    }
+    this.advanceStop(
+      managed,
+      managed.best !== previousBest ? "best update" : "quote update",
+      quote,
+    );
 
     const minimumProfitDistance = Math.max(
       this.deps.config.profitLockMinPips * managed.pip,
@@ -1089,10 +1091,11 @@ export class RiskExecutor {
     const epsilon = managed.pip / 100;
     if (!improved(managed.side, rounded, managed.trailStop, epsilon)) return;
     const currentQuote = quote ?? this.deps.ticks.get(managed.symbol);
-    const spreadBuffer = currentQuote &&
-      isFreshQuote(currentQuote.timestamp, Date.now(), this.deps.config.maxQuoteAgeMs) &&
-      Number.isFinite(currentQuote.spread) &&
-      currentQuote.spread > 0
+    if (
+      !currentQuote ||
+      !isFreshQuote(currentQuote.timestamp, Date.now(), this.deps.config.maxQuoteAgeMs)
+    ) return;
+    const spreadBuffer = Number.isFinite(currentQuote.spread) && currentQuote.spread > 0
       ? currentQuote.spread
       : 0;
     const minimumProfitDistance = Math.max(
