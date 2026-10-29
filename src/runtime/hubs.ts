@@ -46,6 +46,8 @@ export class TickHub {
    * the symbol were retried, the feed would reconnect forever.
    */
   private readonly failed = new Set<string>();
+  private readonly retryCounts = new Map<string, number>();
+  private readonly retryTimers = new Map<string, NodeJS.Timeout>();
   private readonly failuresFile?: string;
   private readonly pending = new Map<string, { symbol: string; at: number }>();
   private pumpTimer?: NodeJS.Timeout;
@@ -156,6 +158,8 @@ export class TickHub {
     this.rateTimer = undefined;
     if (this.pumpTimer) clearTimeout(this.pumpTimer);
     this.pumpTimer = undefined;
+    for (const timer of this.retryTimers.values()) clearTimeout(timer);
+    this.retryTimers.clear();
     this.queued.length = 0;
     this.sent.clear();
     this.pending.clear();
@@ -175,8 +179,13 @@ export class TickHub {
     if (!this.failuresFile) return;
     try {
       const raw = JSON.parse(fs.readFileSync(this.failuresFile, "utf8")) as unknown;
-      if (!Array.isArray(raw)) return;
-      for (const symbol of raw) {
+      // The legacy array also recorded transient subscription failures as
+      // permanently unsupported. Ignore it once so every symbol gets retried;
+      // only the versioned list below is now persisted from explicit not-found errors.
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
+      const saved = raw as { version?: unknown; symbols?: unknown };
+      if (saved.version !== 2 || !Array.isArray(saved.symbols)) return;
+      for (const symbol of saved.symbols) {
         if (typeof symbol === "string" && symbol) this.failed.add(symbol.toUpperCase());
       }
     } catch {
@@ -184,18 +193,39 @@ export class TickHub {
     }
   }
 
-  /** Remember a rejected symbol permanently so it is never subscribed again. */
+  /** Remember only a broker-confirmed unsupported symbol permanently. */
   private markFailed(symbol: string): void {
     if (this.failed.has(symbol)) return;
     this.failed.add(symbol);
+    const timer = this.retryTimers.get(symbol);
+    if (timer) clearTimeout(timer);
+    this.retryTimers.delete(symbol);
+    this.retryCounts.delete(symbol);
     this.persistFailures();
+  }
+
+  /** Retry transient subscription failures with bounded exponential backoff. */
+  private scheduleSubscriptionRetry(symbol: string, baseDelayMs = 1_500): void {
+    if (this.failed.has(symbol) || this.retryTimers.has(symbol)) return;
+    const attempts = (this.retryCounts.get(symbol) ?? 0) + 1;
+    this.retryCounts.set(symbol, attempts);
+    const delay = Math.min(60_000, baseDelayMs * (2 ** Math.min(attempts - 1, 6)));
+    const timer = setTimeout(() => {
+      this.retryTimers.delete(symbol);
+      if (!this.failed.has(symbol) && this.symbols.has(symbol) && !this.sent.has(symbol) && !this.queued.includes(symbol)) {
+        this.queued.push(symbol);
+      }
+      this.pumpSubscriptions();
+    }, delay);
+    timer.unref();
+    this.retryTimers.set(symbol, timer);
   }
 
   private persistFailures(): void {
     if (!this.failuresFile) return;
     try {
       fs.mkdirSync(path.dirname(this.failuresFile), { recursive: true });
-      fs.writeFileSync(this.failuresFile, `${JSON.stringify([...this.failed].sort(), null, 2)}\n`);
+      fs.writeFileSync(this.failuresFile, `${JSON.stringify({ version: 2, updatedAt: new Date().toISOString(), symbols: [...this.failed].sort() }, null, 2)}\n`);
     } catch {
       // Best effort: a full disk must not stop the feed.
     }
@@ -280,15 +310,22 @@ export class TickHub {
         this.pending.delete(candidate.id);
         if (code === 200) {
           this.sent.add(entry.symbol);
-        } else if (code === 3015) {
-          // Rate limited: retry later, do not permanently drop the symbol.
-          this.queued.push(entry.symbol);
+          this.retryCounts.delete(entry.symbol);
+          const retryTimer = this.retryTimers.get(entry.symbol);
+          if (retryTimer) clearTimeout(retryTimer);
+          this.retryTimers.delete(entry.symbol);
         } else {
-          // 4000 MARKET_INSTRUMENT_NOT_FOUND and friends close the whole
-          // socket, so remember the symbol and never send it again.
-          this.markFailed(entry.symbol);
+          const detail = candidate.error_message ?? "";
+          const permanentlyMissing = code === 4000 || /MARKET_INSTRUMENT_NOT_FOUND|instrument.{0,20}(not found|unsupported)|unknown instrument/i.test(detail);
+          if (permanentlyMissing) {
+            this.markFailed(entry.symbol);
+          } else {
+            // Rate limiting and other API/socket hiccups are transient; never
+            // blacklist a tradable symbol based on an ambiguous error.
+            this.scheduleSubscriptionRetry(entry.symbol, code === 3015 ? 3_000 : 1_500);
+          }
           this.options.logger?.(
-            `subscription failed for ${entry.symbol}: ${code} ${candidate.error_message ?? ""}`,
+            `subscription failed for ${entry.symbol}: ${code} ${detail}${permanentlyMissing ? " (permanently unsupported)" : " (will retry)"}`,
           );
         }
       }
