@@ -27,7 +27,7 @@ test("ENTRY panel keeps full reject reasons and wraps them to continuation rows"
   } as unknown as AgentStateFile;
 
   const rendered = renderAgentContainers(agent, 120).replace(/\u001b\[[0-9;]*m/g, "");
-  const normalized = rendered.replace(/\s+/g, " ");
+  const normalized = rendered.replace(/\s*↳\s*/g, " ").replace(/\s+/g, " ");
   assert.ok(normalized.includes(message), "the complete original entry message must be visible");
   assert.match(rendered, /↳ /, "wrapped continuation rows must have a marker");
   assert.doesNotMatch(rendered, /…/, "entry diagnostic text should not be ellipsis-truncated");
