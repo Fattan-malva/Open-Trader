@@ -1073,12 +1073,24 @@ export class RiskExecutor {
       factor;
     const epsilon = managed.pip / 100;
     if (!improved(managed.side, rounded, managed.trailStop, epsilon)) return;
+    const currentQuote = this.deps.ticks.get(managed.symbol);
+    const spreadBuffer = currentQuote &&
+      isFreshQuote(currentQuote.timestamp, Date.now(), this.deps.config.maxQuoteAgeMs) &&
+      Number.isFinite(currentQuote.spread) &&
+      currentQuote.spread > 0
+      ? currentQuote.spread
+      : 0;
+    const minimumProfitDistance = Math.max(
+      this.deps.config.profitLockMinPips * managed.pip,
+      spreadBuffer,
+    );
     if (
       !canMoveTrailStop(
         managed.side,
         rounded,
         managed.entry,
         Boolean(managed.trailActivated),
+        minimumProfitDistance,
       )
     ) {
       return;
@@ -1131,11 +1143,21 @@ export class RiskExecutor {
     const atrValue = lastFinite(atr(closed, this.deps.config.trailAtrPeriod));
     if (atrValue === undefined || !(atrValue > 0)) return;
 
-    const distance = trailDistanceFromAtr(
+    const normalDistance = trailDistanceFromAtr(
       atrValue,
       this.deps.config.trailAtrFactor,
       this.deps.config.trailMinPips * managed.pip,
     );
+    // Once profit is locked, ATR refreshes may only keep or tighten the
+    // distance. They can never restore the wider pre-lock trailing distance.
+    const profitDistance = trailDistanceFromAtr(
+      atrValue,
+      this.deps.config.profitTrailAtrFactor,
+      this.deps.config.profitTrailMinPips * managed.pip,
+    );
+    const distance = managed.trailActivated
+      ? Math.min(managed.trailDistance, profitDistance)
+      : normalDistance;
     managed.atr = atrValue;
     managed.trailDistance = distance;
     this.advanceStop(managed, `ATR ${atrValue.toFixed(managed.digits)}`);
