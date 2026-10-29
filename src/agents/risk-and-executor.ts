@@ -372,7 +372,7 @@ export class RiskExecutor {
       return { ok: false, reason: "unmanaged position present; total account risk cannot be verified" };
     }
 
-    const quote = this.deps.ticks.get(signal.symbol);
+    let quote = this.deps.ticks.get(signal.symbol);
     if (!quote || Date.now() - quote.timestamp > this.deps.config.maxQuoteAgeMs) {
       return { ok: false, reason: "quote stale" };
     }
@@ -382,7 +382,7 @@ export class RiskExecutor {
     // The signal's entry must still be reachable; otherwise the setup is gone.
     // Compare the price we would actually pay/receive (not the mid), so the
     // normal bid/ask spread never counts as a chase.
-    const execution = signal.side === "buy" ? quote.ask : quote.bid;
+    let execution = signal.side === "buy" ? quote.ask : quote.bid;
     if (Math.abs(execution - signal.entry) > this.deps.config.maxChaseAtr * signal.atr) {
       return { ok: false, reason: "entry moved too far" };
     }
@@ -406,7 +406,7 @@ export class RiskExecutor {
       this.deps.config.minStopPips * pip,
       quote.spread * 3,
     );
-    const emergencySl = roundStopAway(
+    let emergencySl = roundStopAway(
       execution - stopSign * emergencyDistance,
       digits,
       signal.side,
@@ -511,6 +511,43 @@ export class RiskExecutor {
       };
     }
 
+    // Conditions, conversion rates and account sizing may take several seconds.
+    // Re-read the executable quote immediately before submitting the market order.
+    const latestQuote = this.deps.ticks.get(signal.symbol);
+    if (!latestQuote || Date.now() - latestQuote.timestamp > this.deps.config.maxQuoteAgeMs) {
+      return { ok: false, reason: "quote stale during sizing; retry next scan" };
+    }
+    if (!spreadWithinLimit(signal.symbol, latestQuote, this.deps.config)) {
+      return { ok: false, reason: "spread changed during sizing; retry next scan" };
+    }
+    const latestExecution = signal.side === "buy" ? latestQuote.ask : latestQuote.bid;
+    if (Math.abs(latestExecution - signal.entry) > this.deps.config.maxChaseAtr * signal.atr) {
+      return { ok: false, reason: "entry moved too far during sizing; retry next scan" };
+    }
+    const latestEmergencyDistance = Math.max(
+      this.deps.config.emergencySlAtrFactor * signal.atr,
+      this.deps.config.minStopPips * pip,
+      latestQuote.spread * 3,
+    );
+    // If the spread widened enough to require a wider stop, don't send a lot
+    // size calculated against the old, smaller risk distance.
+    if (latestEmergencyDistance > emergencyDistance + pip * 0.01) {
+      return { ok: false, reason: "spread widened during sizing; stop and lot need recalculation" };
+    }
+    quote = latestQuote;
+    execution = latestExecution;
+    emergencySl = roundStopAway(
+      execution - stopSign * emergencyDistance,
+      digits,
+      signal.side,
+    );
+    if (
+      (signal.side === "buy" && emergencySl >= execution) ||
+      (signal.side === "sell" && emergencySl <= execution)
+    ) {
+      return { ok: false, reason: "latest emergency SL is not protective" };
+    }
+
     const beforeIds = new Set(view.positions.map((position) => position.position_id));
     const result = await this.deps.tools.open({
       symbol: signal.symbol,
@@ -593,7 +630,7 @@ export class RiskExecutor {
       sl: managed.emergencySl,
       riskUsd: managed.riskUsd,
       reason:
-        `risk ${Number(managed.riskUsd ?? 0).toFixed(2)} USD · emergency ${(Math.abs(entry - emergencySl) / pip).toFixed(1)}p · ` +
+        `${signal.setupType} score ${signal.score.toFixed(1)} · risk ${Number(managed.riskUsd ?? 0).toFixed(2)} USD · emergency ${(Math.abs(entry - emergencySl) / pip).toFixed(1)}p · ` +
         `trail ${(trailDistance / pip).toFixed(1)}p · score ${signal.score.toFixed(1)}`,
       ok: true,
     });
