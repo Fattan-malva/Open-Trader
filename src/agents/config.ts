@@ -118,6 +118,9 @@ export function loadAgentConfig(
 
     maxSpreadPips: num(env, "AGENT_MAX_SPREAD_PIPS", 5),
     maxSpreadPct: num(env, "AGENT_MAX_SPREAD_PCT", 0.08),
+    maxMetalSpreadPct: num(env, "AGENT_MAX_METAL_SPREAD_PCT", 0.12),
+    maxCryptoSpreadPct: num(env, "AGENT_MAX_CRYPTO_SPREAD_PCT", 0.2),
+    maxEnergySpreadPct: num(env, "AGENT_MAX_ENERGY_SPREAD_PCT", 0.12),
     maxSpreadSpikeRatio: Math.max(1.1, num(env, "AGENT_MAX_SPREAD_SPIKE_RATIO", 2.5)),
     maxSpreadTrailRatio: num(env, "AGENT_MAX_SPREAD_TRAIL", 0.4),
     minAtrPct: num(env, "AGENT_MIN_ATR_PCT", 0.0025),
