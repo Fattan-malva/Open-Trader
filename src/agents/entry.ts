@@ -79,13 +79,13 @@ export function decideEntry(input: {
   if (!spread.ok) rejects.push(spread.reason ?? "spread rejected");
   const quoteAge = now - quote.timestamp;
   if (quoteAge > config.maxQuoteAgeMs || quoteAge < -1_000) {
-    rejects.push(\`quote \${Math.round(quoteAge)}ms old/future\`);
+    rejects.push(`quote ${Math.round(quoteAge)}ms old/future`);
   }
 
   const confirm = input.confirmCandles ?? candidate.candles;
   const last = confirm[confirm.length - 1];
   if (!last) {
-    return { signal: null, rejects: [...rejects, \`\${config.confirmTimeframe} candles not ready\`] };
+    return { signal: null, rejects: [...rejects, `${config.confirmTimeframe} candles not ready`] };
   }
 
   const atrValue = candidate.atr;
@@ -102,31 +102,31 @@ export function decideEntry(input: {
     : Number.POSITIVE_INFINITY;
   if (!Number.isFinite(spreadRatio) || spreadRatio > config.maxSpreadTrailRatio) {
     rejects.push(
-      \`spread cost \${(spreadRatio * 100).toFixed(0)}% of trail \` +
-        \`(max \${(config.maxSpreadTrailRatio * 100).toFixed(0)}%)\`,
+      `spread cost ${(spreadRatio * 100).toFixed(0)}% of trail ` +
+        `(max ${(config.maxSpreadTrailRatio * 100).toFixed(0)}%)`,
     );
   }
 
   const confirmed = side === "buy" ? last.close > last.open : last.close < last.open;
   if (!confirmed) {
     rejects.push(
-      \`\${config.confirmTimeframe} close not \${side === "buy" ? "bullish" : "bearish"} \` +
-        \`(\${last.open}→\${last.close})\`,
+      `${config.confirmTimeframe} close not ${side === "buy" ? "bullish" : "bearish"} ` +
+        `(${last.open}→${last.close})`,
     );
   }
 
   if (candidate.setupType === "pullback") {
     if (candidate.rsi < config.rsiMin || candidate.rsi > config.rsiMax) {
-      rejects.push(\`pullback RSI \${candidate.rsi.toFixed(0)} outside \${config.rsiMin}-\${config.rsiMax}\`);
+      rejects.push(`pullback RSI ${candidate.rsi.toFixed(0)} outside ${config.rsiMin}-${config.rsiMax}`);
     }
     if (Math.abs(candidate.distanceAtr) > config.pullbackDistanceAtr) {
-      rejects.push(\`pullback price \${candidate.distanceAtr.toFixed(2)}×ATR from EMA50\`);
+      rejects.push(`pullback price ${candidate.distanceAtr.toFixed(2)}×ATR from EMA50`);
     }
   } else if (
     (side === "buy" && candidate.rsi > config.breakoutRsiCeiling) ||
     (side === "sell" && candidate.rsi < config.breakoutRsiFloor)
   ) {
-    rejects.push(\`breakout momentum exhausted at RSI \${candidate.rsi.toFixed(0)}\`);
+    rejects.push(`breakout momentum exhausted at RSI ${candidate.rsi.toFixed(0)}`);
   }
 
   // Mid is used for chase-distance so the normal bid/ask spread is not counted
@@ -134,7 +134,7 @@ export function decideEntry(input: {
   const chaseAtr = Math.abs(quote.mid - last.close) / atrValue;
   if (chaseAtr > config.maxChaseAtr) {
     rejects.push(
-      \`chasing \${chaseAtr.toFixed(2)}×ATR from \${config.confirmTimeframe} close\`,
+      `chasing ${chaseAtr.toFixed(2)}×ATR from ${config.confirmTimeframe} close`,
     );
   }
 
@@ -151,11 +151,11 @@ export function decideEntry(input: {
 
   const reasons = [
     ...candidate.reasons,
-    \`\${candidate.setupType} \${config.confirmTimeframe} \${side === "buy" ? "bullish" : "bearish"} close confirm\`,
-    \`spread \${spreadLabel(symbol, quote)}\`,
-    \`spread/trail \${(spreadRatio * 100).toFixed(0)}%\`,
-    \`emergency SL \${slPips.toFixed(1)}p\`,
-    \`trail \${(trailDistance / pip).toFixed(1)}p\`,
+    `${candidate.setupType} ${config.confirmTimeframe} ${side === "buy" ? "bullish" : "bearish"} close confirm`,
+    `spread ${spreadLabel(symbol, quote)}`,
+    `spread/trail ${(spreadRatio * 100).toFixed(0)}%`,
+    `emergency SL ${slPips.toFixed(1)}p`,
+    `trail ${(trailDistance / pip).toFixed(1)}p`,
   ];
 
   return {
