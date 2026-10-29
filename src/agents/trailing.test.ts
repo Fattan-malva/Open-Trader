@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { advanceVirtualStop, initialVirtualStop, virtualStopLocksProfit, virtualStopHit } from "./trailing.js";
+import { advanceVirtualStop, initialVirtualStop, updateBest, virtualStopLocksProfit, virtualStopHit } from "./trailing.js";
 
 function near(actual: number, expected: number): void {
   assert.ok(Math.abs(actual - expected) < 1e-9, `expected ${actual} to be close to ${expected}`);
@@ -17,6 +17,36 @@ test("virtual stop only ratchets toward profit", () => {
   near(advanceVirtualStop("buy", 1.1040, 1.1030, 0.0010), 1.1040);
   near(advanceVirtualStop("sell", 1.1010, 1.0950, 0.0010), 1.0960);
   near(advanceVirtualStop("sell", 1.0960, 1.0970, 0.0010), 1.0960);
+});
+
+test("TS VIRT ratchets repeatedly as profit increases and stays put on retracement", () => {
+  // BUY: each new best bid raises TS VIRT; a pullback cannot lower it.
+  let buyBest = 1.1000;
+  let buyStop = initialVirtualStop("buy", 1.1000, 0.0010);
+  for (const bid of [1.1010, 1.1020, 1.1030, 1.1040]) {
+    buyBest = updateBest("buy", buyBest, bid, bid + 0.0002);
+    buyStop = advanceVirtualStop("buy", buyStop, buyBest, 0.0010);
+  }
+  near(buyBest, 1.1040);
+  near(buyStop, 1.1030);
+  const buyStopAtPeak = buyStop;
+  buyBest = updateBest("buy", buyBest, 1.1020, 1.1022);
+  buyStop = advanceVirtualStop("buy", buyStop, buyBest, 0.0010);
+  near(buyStop, buyStopAtPeak);
+
+  // SELL: each new best ask lowers TS VIRT; a rebound cannot raise it.
+  let sellBest = 1.1000;
+  let sellStop = initialVirtualStop("sell", 1.1000, 0.0010);
+  for (const ask of [1.0990, 1.0980, 1.0970, 1.0960]) {
+    sellBest = updateBest("sell", sellBest, ask - 0.0002, ask);
+    sellStop = advanceVirtualStop("sell", sellStop, sellBest, 0.0010);
+  }
+  near(sellBest, 1.0960);
+  near(sellStop, 1.0970);
+  const sellStopAtPeak = sellStop;
+  sellBest = updateBest("sell", sellBest, 1.0978, 1.0980);
+  sellStop = advanceVirtualStop("sell", sellStop, sellBest, 0.0010);
+  near(sellStop, sellStopAtPeak);
 });
 
 test("virtual stop counts as profit protection only beyond entry", () => {
