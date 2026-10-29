@@ -51,8 +51,10 @@ export interface ManagedPosition {
   best: number;
   atr: number;
   trailActivated?: boolean;
-  /** Initial stop risk in USD for aggregate account-risk checks. */
+  /** Current broker-stop risk in USD; recalculated from the broker SL before each new entry. */
   riskUsd?: number;
+  /** USD value of one pip per lot, captured from contract metadata at open. */
+  pipValueUsdPerLot?: number;
   lastBrokerStopMoveAt?: number;
 
   openedAt: number;
@@ -125,6 +127,8 @@ export interface SizingInput {
   volumeMax: number;
   volumeStep: number;
   maxLots: number;
+  /** Remaining account-wide open-risk budget, USD. */
+  riskBudgetUsd?: number;
 }
 
 export interface SizingResult {
@@ -141,7 +145,13 @@ export function computeLots(input: SizingInput): SizingResult {
   if (!(input.slPips > 0) || !(input.pipValuePerLot > 0) || !(input.volumeStep > 0)) {
     return { lots: 0, riskUsd: 0, reason: "invalid sizing inputs" };
   }
-  const riskUsd = (input.equity * input.riskPct) / 100;
+  const perTradeRiskUsd = (input.equity * input.riskPct) / 100;
+  const riskUsd = input.riskBudgetUsd === undefined
+    ? perTradeRiskUsd
+    : Math.min(perTradeRiskUsd, Math.max(0, input.riskBudgetUsd));
+  if (!(riskUsd > 0)) {
+    return { lots: 0, riskUsd: 0, reason: "no remaining aggregate open-risk budget" };
+  }
   const rawLots = riskUsd / (input.slPips * input.pipValuePerLot);
   let lots = roundVolumeDown(Math.min(rawLots, input.maxLots), input.volumeStep);
   if (lots > input.volumeMax) lots = roundVolumeDown(input.volumeMax, input.volumeStep);
@@ -149,7 +159,9 @@ export function computeLots(input: SizingInput): SizingResult {
     return {
       lots: 0,
       riskUsd,
-      reason: `risk ${riskUsd.toFixed(2)} = ${rawLots.toFixed(3)} lot < volume_min ${input.volumeMin}`,
+      reason: input.riskBudgetUsd !== undefined && input.riskBudgetUsd < perTradeRiskUsd
+        ? `remaining open-risk budget ${riskUsd.toFixed(2)} USD supports ${rawLots.toFixed(4)} lot < volume_min ${input.volumeMin}; no safe minimum lot fits`
+        : `risk ${riskUsd.toFixed(2)} = ${rawLots.toFixed(3)} lot < volume_min ${input.volumeMin}`,
     };
   }
   return { lots, riskUsd: lots * input.slPips * input.pipValuePerLot };
@@ -287,6 +299,21 @@ export class RiskExecutor {
         ? (side === "buy" ? Math.max(initialStop, savedStop) : Math.min(initialStop, savedStop))
         : initialStop;
       const savedRiskUsd = Number(position.riskUsd);
+      const originalOpen = [...this.tradeLog].reverse().find(
+        (entry) => entry.action === "open" && entry.positionId === position.positionId,
+      );
+      const originalEntry = Number(originalOpen?.price);
+      const originalStop = Number(originalOpen?.sl);
+      const originalVolume = Number(originalOpen?.volume) > 0
+        ? Number(originalOpen?.volume)
+        : Number(position.volume);
+      const originalStopPips = originalEntry > 0 && originalStop > 0
+        ? Math.abs(originalEntry - originalStop) / pip
+        : 0;
+      const inferredPipValueUsdPerLot = savedRiskUsd > 0 && originalStopPips > 0 && originalVolume > 0
+        ? savedRiskUsd / (originalStopPips * originalVolume)
+        : undefined;
+      const storedPipValueUsdPerLot = Number(position.pipValueUsdPerLot);
       const wasAlreadyProtected = canMoveTrailStop(
         side,
         trailStop,
@@ -313,7 +340,10 @@ export class RiskExecutor {
         trailActivated: typeof position.trailActivated === "boolean"
           ? position.trailActivated
           : wasAlreadyProtected,
-        riskUsd: savedRiskUsd > 0 ? savedRiskUsd : undefined,
+        riskUsd: savedRiskUsd >= 0 ? savedRiskUsd : undefined,
+        pipValueUsdPerLot: storedPipValueUsdPerLot > 0
+          ? storedPipValueUsdPerLot
+          : inferredPipValueUsdPerLot,
         lastBrokerStopMoveAt: 0,
         openedAt: Number(position.openedAt) || Date.now(),
         // Force a fresh trail ATR read on the first manage tick after a restart.
@@ -367,6 +397,48 @@ export class RiskExecutor {
   }
 
   // ---------------------------------------------------------------- open
+
+  /**
+   * Recalculate aggregate risk from each managed position's latest known
+   * broker-side stop. TS VIRT is deliberately never used as a risk-reducing SL.
+   */
+  private recalculateManagedOpenRisk(view: AccountView): { riskUsd: number; reason?: string } {
+    let totalUsd = 0;
+    for (const managed of this.managed.values()) {
+      const position = view.positions.find((entry) => entry.position_id === managed.positionId);
+      const sltp = view.orders.find(
+        (order) => order.order_type === "sltp" &&
+          order.position_id === managed.positionId && order.state === "placed",
+      );
+      const positionStop = Number(position?.stop_loss_price ?? 0);
+      const orderStop = Number(sltp?.stop_loss_price ?? 0);
+      // emergencySl is the last confirmed broker SL sent with the position or
+      // acknowledged by a later SL modification; it is not the virtual trail.
+      const brokerStop = positionStop > 0 ? positionStop : orderStop > 0 ? orderStop : managed.emergencySl;
+      const pipValue = Number(managed.pipValueUsdPerLot);
+      const volume = parseNumber(position?.volume, managed.volume);
+      const entry = parseNumber(position?.open_price, managed.entry);
+      if (!(brokerStop > 0) || !(pipValue > 0) || !(managed.pip > 0) || !(volume > 0) || !(entry > 0)) {
+        return {
+          riskUsd: totalUsd,
+          reason: `open position risk metadata unavailable for ${managed.symbol}; cannot verify broker-stop risk safely`,
+        };
+      }
+      const adverseDistance = managed.side === "buy"
+        ? Math.max(0, entry - brokerStop)
+        : Math.max(0, brokerStop - entry);
+      const riskUsd = (adverseDistance / managed.pip) * volume * pipValue;
+      if (!Number.isFinite(riskUsd) || riskUsd < 0) {
+        return {
+          riskUsd: totalUsd,
+          reason: `invalid broker-stop risk for ${managed.symbol}; cannot add risk safely`,
+        };
+      }
+      managed.riskUsd = riskUsd;
+      totalUsd += riskUsd;
+    }
+    return { riskUsd: totalUsd };
+  }
 
   async open(
     signal: EntrySignal,
@@ -474,6 +546,17 @@ export class RiskExecutor {
     const pipValuePerLot = contractSize * pip * quoteRate;
     const sizingSlPips = Math.abs(execution - emergencySl) / pip;
     const riskEquityUsd = Math.min(view.balance, view.equity) * accountCurrencyToUsd;
+    const maxOpenRiskUsd = riskEquityUsd * this.deps.config.maxOpenRiskPct / 100;
+    const currentRisk = this.recalculateManagedOpenRisk(view);
+    if (currentRisk.reason) return { ok: false, reason: currentRisk.reason };
+    const openRiskUsd = currentRisk.riskUsd;
+    const remainingRiskUsd = maxOpenRiskUsd - openRiskUsd;
+    if (!(remainingRiskUsd > 0.000001)) {
+      return {
+        ok: false,
+        reason: `open risk cap ${openRiskUsd.toFixed(2)} >= ${maxOpenRiskUsd.toFixed(2)} USD; no remaining aggregate risk budget`,
+      };
+    }
     const sizing = computeLots({
       equity: riskEquityUsd,
       riskPct: this.deps.config.riskPct,
@@ -483,6 +566,7 @@ export class RiskExecutor {
       volumeMax,
       volumeStep,
       maxLots: this.deps.config.maxLotsPerTrade,
+      riskBudgetUsd: remainingRiskUsd,
     });
     if (sizing.reason || sizing.lots <= 0) {
       return { ok: false, reason: sizing.reason ?? "size 0" };
@@ -510,16 +594,10 @@ export class RiskExecutor {
     }
 
     const plannedRiskUsd = finalLots * sizingSlPips * pipValuePerLot;
-    const currentManaged = [...this.managed.values()];
-    if (currentManaged.some((position) => !(Number(position.riskUsd) > 0))) {
-      return { ok: false, reason: "open position risk metadata unavailable; wait for it to close before adding risk" };
-    }
-    const openRiskUsd = currentManaged.reduce((sum, position) => sum + Number(position.riskUsd), 0);
-    const maxOpenRiskUsd = riskEquityUsd * this.deps.config.maxOpenRiskPct / 100;
-    if (openRiskUsd + plannedRiskUsd > maxOpenRiskUsd) {
+    if (openRiskUsd + plannedRiskUsd > maxOpenRiskUsd + Math.max(0.000001, maxOpenRiskUsd * 1e-9)) {
       return {
         ok: false,
-        reason: `open risk cap ${openRiskUsd.toFixed(2)} + ${plannedRiskUsd.toFixed(2)} > ${maxOpenRiskUsd.toFixed(2)} USD`,
+        reason: `open risk cap ${openRiskUsd.toFixed(2)} + ${plannedRiskUsd.toFixed(2)} > ${maxOpenRiskUsd.toFixed(2)} USD after lot rounding`,
       };
     }
 
@@ -633,6 +711,7 @@ export class RiskExecutor {
       trailActivated: false,
       riskUsd: (Number(position.volume) > 0 ? Number(position.volume) : finalLots) *
         (Math.abs(entry - emergencySl) / pip) * pipValuePerLot,
+      pipValueUsdPerLot: pipValuePerLot,
       lastBrokerStopMoveAt: 0,
       openedAt: Date.now(),
       lastAtrSyncAt: candleBoundary(this.deps.config.trailTimeframe),
@@ -714,6 +793,11 @@ export class RiskExecutor {
         ? (side === "buy" ? Math.max(initialStop, brokerSl) : Math.min(initialStop, brokerSl))
         : initialStop;
 
+      const originalStopPips = riskDistance / pip;
+      const originalVolume = Number(entry.volume) > 0 ? Number(entry.volume) : Number(position.volume);
+      const inferredPipValueUsdPerLot = Number(entry.riskUsd) > 0 && originalStopPips > 0 && originalVolume > 0
+        ? Number(entry.riskUsd) / (originalStopPips * originalVolume)
+        : undefined;
       const managed: ManagedPosition = {
         positionId: position.position_id,
         symbol,
@@ -736,7 +820,8 @@ export class RiskExecutor {
           false,
           this.deps.config.profitLockMinPips * pip,
         ),
-        riskUsd: Number(entry.riskUsd) > 0 ? Number(entry.riskUsd) : undefined,
+        riskUsd: Number(entry.riskUsd) >= 0 ? Number(entry.riskUsd) : undefined,
+        pipValueUsdPerLot: inferredPipValueUsdPerLot,
         lastBrokerStopMoveAt: 0,
         openedAt: Date.parse(position.create_time) || entry.at,
         lastAtrSyncAt: 0,
