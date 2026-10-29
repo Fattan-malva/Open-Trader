@@ -154,10 +154,9 @@ instruments whose M1 ATR is too quiet or too wild.
 - Realized P/L can still differ because of spread, commission, and slippage.
 
 Example: a BUY entry at `1.0850` with an 8-pip virtual distance starts at
-`1.0842`. After the profit trigger activates, a best bid of `1.0900` moves the
-ATR trail toward `1.0892` (or tighter if the profit-lock floor requires it).
-If price later falls through TS VIRT, the position is closed; the stop never
-moves back down.
+`1.0842`. As the best bid rises to `1.0900`, TS VIRT ratchets toward `1.0892`.
+If price later falls, the stop stays at its latest ratcheted level; when bid
+reaches TS VIRT, the position is closed.
 
 ## Agent state and audit
 
