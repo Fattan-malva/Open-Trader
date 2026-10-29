@@ -50,7 +50,7 @@ export function categorize(symbol: string): InstrumentCategory {
   if (METALS.test(upper)) return "metals";
   if (ENERGY.test(upper)) return "energy";
   if (isCrypto(upper)) return "crypto";
-  if (/^[A-Z]{6}$/.test(symbol)) return "fx";
+  if (/^[A-Z]{6}$/.test(upper)) return "fx";
   if (/\d/.test(symbol)) return "index";
   return "stock";
 }
