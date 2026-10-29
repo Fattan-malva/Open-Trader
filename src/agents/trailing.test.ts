@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { advanceVirtualStop, canMoveTrailStop, initialVirtualStop, updateBest, virtualStopLocksProfit, virtualStopHit } from "./trailing.js";
+import { advanceVirtualStop, canMoveTrailStop, initialVirtualStop, isFreshQuote, updateBest, virtualStopLocksProfit, virtualStopHit } from "./trailing.js";
 
 function near(actual: number, expected: number): void {
   assert.ok(Math.abs(actual - expected) < 1e-9, `expected ${actual} to be close to ${expected}`);
@@ -71,6 +71,13 @@ test("the first TS update must already lock profit for BUY and SELL", () => {
 test("after profit is locked, the trail may tighten further but never loosen", () => {
   assert.equal(canMoveTrailStop("buy", 1.1020, 1.1000, true), true);
   assert.equal(canMoveTrailStop("sell", 1.0980, 1.1000, true), true);
+});
+
+
+test("TS price triggers require a fresh quote", () => {
+  assert.equal(isFreshQuote(9_500, 10_000, 1_000), true);
+  assert.equal(isFreshQuote(8_000, 10_000, 1_000), false);
+  assert.equal(isFreshQuote(11_500, 10_000, 1_000), false);
 });
 
 test("virtual stop hit uses executable side of the quote", () => {
