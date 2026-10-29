@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { advanceVirtualStop, initialVirtualStop, profitLockActivationThreshold, virtualStopHit } from "./trailing.js";
+import { advanceVirtualStop, initialVirtualStop, virtualStopLocksProfit, virtualStopHit } from "./trailing.js";
 
 function near(actual: number, expected: number): void {
   assert.ok(Math.abs(actual - expected) < 1e-9, `expected ${actual} to be close to ${expected}`);
@@ -19,10 +19,13 @@ test("virtual stop only ratchets toward profit", () => {
   near(advanceVirtualStop("sell", 1.0960, 1.0970, 0.0010), 1.0960);
 });
 
-test("profit-lock activates just above its lock target with a safety buffer", () => {
-  near(profitLockActivationThreshold(0.10), 0.15);
-  near(profitLockActivationThreshold(0), 0.02);
-  near(profitLockActivationThreshold(-1), 0.02);
+test("virtual stop counts as profit protection only beyond entry", () => {
+  assert.equal(virtualStopLocksProfit("buy", 1.1001, 1.1000), true);
+  assert.equal(virtualStopLocksProfit("buy", 1.1000, 1.1000), false);
+  assert.equal(virtualStopLocksProfit("buy", 1.0999, 1.1000), false);
+  assert.equal(virtualStopLocksProfit("sell", 1.0999, 1.1000), true);
+  assert.equal(virtualStopLocksProfit("sell", 1.1000, 1.1000), false);
+  assert.equal(virtualStopLocksProfit("sell", 1.1001, 1.1000), false);
 });
 
 test("virtual stop hit uses executable side of the quote", () => {
