@@ -107,7 +107,7 @@ export function assessSpread(
   const maxSpikeRatio = limits.maxSpreadSpikeRatio ?? 2.5;
   const series = spreadHistory.get(symbol) ?? [];
   const baselineValues = series
-    .filter((sample) => sample.at < quote.timestamp && quote.timestamp - sample.at <= HISTORY_WINDOW_MS)
+    .filter((sample) => sample.at <= quote.timestamp - SAMPLE_INTERVAL_MS && quote.timestamp - sample.at <= HISTORY_WINDOW_MS)
     .map((sample) => fx ? sample.value / pipSize(symbol) : sample.value);
   if (baselineValues.length >= MIN_BASELINE_SAMPLES) {
     const baseline = median(baselineValues);
