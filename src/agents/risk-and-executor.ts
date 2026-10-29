@@ -21,6 +21,7 @@ import {
   advanceVirtualStop,
   canMoveTrailStop,
   initialVirtualStop,
+  isFreshQuote,
   profitLockActivationThreshold,
   trailDistanceFromAtr,
   updateBest,
@@ -852,10 +853,7 @@ export class RiskExecutor {
       // Never trigger TS or update it using a cached quote that is no longer
       // current. The broker-side emergency SL remains active while feed data
       // is stale; a fresh executable quote is required for a TS close decision.
-      if (
-        now - quote.timestamp > this.deps.config.maxQuoteAgeMs ||
-        quote.timestamp - now > 1_000
-      ) {
+      if (!isFreshQuote(quote.timestamp, now, this.deps.config.maxQuoteAgeMs)) {
         continue;
       }
 
