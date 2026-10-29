@@ -809,8 +809,9 @@ function lastAgentActivity(
 /** Recent log lines for one agent role, shown under its own card. */
 function conciseAgentMessage(entry: AgentActivity): string {
   const message = entry.message.replace(/\\s+/g, " ").trim();
-  const symbolMatch = message.match(/\\b([A-Z][A-Z0-9._-]{2,})\\b/);
-  const symbol = symbolMatch?.[1];
+  const symbol = message.match(/\\b([A-Z][A-Z0-9._-]{2,})\\b/g)?.find((token) =>
+    !["CLOSE", "OPEN", "TS", "SL", "TRAIL", "ERROR", "ERR", "SKIP", "SCAN", "ENTRY", "BUY", "SELL", "PASS", "NO", "SIGNAL", "PROTECT", "ADOPT", "VIRTUAL", "HIT"].includes(token),
+  );
 
   if (entry.agent === "trader") {
     const pnl = message.match(/net (-?\\d+(?:\\.\\d+)?) USD/i);
