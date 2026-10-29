@@ -44,9 +44,16 @@ every 2 s ──► fast screener (M5 trend + cached M1 pullback/breakout + adap
   **broker emergency stop-loss**
   and never sends a take-profit.
 - **Trader** starts TS VIRT from the actual fill and fast-ATR distance rather
-  than copying the distant emergency SL. It follows the best executable price
-  by a dynamic ATR/pip distance, ratchets only toward profit, and attempts to
-  tighten the broker emergency SL once TS VIRT crosses entry.
+  than copying the distant emergency SL. It locks profit as soon as the
+  executable side clears entry by spread + the configured buffer, then follows
+  the best executable price by a tight dynamic ATR/pip distance, ratchets only
+  toward profit, and attempts to tighten the broker emergency SL.
+- **Dynamic account management**: the broker snapshot is the source of truth.
+  Any open position the bot does not track yet is adopted from broker data
+  (entry, SL, volume, instrument conditions) regardless of who opened it.
+  Positions without an SL get an ATR/spread-based emergency SL first. This
+  means no manual entry or pre-existing bot history is required, and every
+  position on the account is managed by TS.
 - The broker SL is the crash safety net; the dashboard shows both the broker SL
   and the live `TS VIRT` level on every position row.
 
@@ -135,8 +142,8 @@ account.
 | Breakout RSI exhaustion | BUY ≤ 82 / SELL ≥ 18 | `AGENT_BREAKOUT_RSI_CEILING`, `AGENT_BREAKOUT_RSI_FLOOR` |
 | Spread cost | ≤ 40% of trail | `AGENT_MAX_SPREAD_TRAIL` |
 | Initial virtual trail | max(1.2×M1 ATR, 4 pips) | `AGENT_TRAIL_ATR`, `AGENT_TRAIL_MIN_PIPS` |
-| First profit lock | Beyond entry by max(1 pip, current spread) | `AGENT_PROFIT_LOCK_MIN_PIPS` |
-| Post-lock trail | max(0.65×ATR, 1.5 pips, spread cushion), then never widens | `AGENT_PROFIT_TRAIL_ATR`, `AGENT_PROFIT_TRAIL_MIN_PIPS` |
+| First profit lock | Triggered at spread + `AGENT_PROFIT_LOCK_MIN_PIPS`; stop placed at entry ± that cushion | `AGENT_PROFIT_LOCK_MIN_PIPS` |
+| Post-lock trail | max(0.3×ATR, 0.5 pips, 1.1×spread), then never widens | `AGENT_PROFIT_TRAIL_ATR`, `AGENT_PROFIT_TRAIL_MIN_PIPS` |
 | Broker emergency SL | 1.5×M1 ATR, min 6 pips / 3× spread | `AGENT_EMERGENCY_SL_ATR`, `AGENT_MIN_STOP_PIPS` |
 | Broker SL update cadence / minimum move | 10 s / 2 pips | `AGENT_BROKER_STOP_UPDATE_MS`, `AGENT_BROKER_STOP_MOVE_MIN_PIPS` |
 | Max chase | 1.5×ATR | `AGENT_MAX_CHASE_ATR` |
@@ -164,12 +171,14 @@ instruments whose M1 ATR is too quiet or too wild.
   the account-management timer. BUY tracks the highest executable bid and the
   stop ratchets only upward; SELL tracks the lowest executable ask and the stop
   ratchets only downward.
-- The first published TS VIRT update must already be beyond entry by at least
-  the configured profit buffer or the current spread, whichever is larger.
+- The first published TS VIRT update happens as soon as the executable side
+  clears entry by the current spread plus the configured buffer. The stop is
+  placed at entry ± that cushion immediately; it does not wait for the wider
+  initial trail distance to be exceeded.
 - After the first profit lock, the trail distance switches to the tighter
-  `max(0.65×ATR, 1.5 pips, 1.1×spread)` target by default. Each favorable tick
-  can tighten TS again; the distance and stop level never move backwards.
-  When ATR refreshes or volatility expands, the active distance is never widened.
+  `max(0.3×ATR, 0.5 pips, 1.1×spread)` target by default and keeps chasing each
+  favorable tick. The distance and stop level never move backwards. When ATR
+  refreshes or volatility expands, the active distance is never widened.
 - No fixed USD activation threshold is used. BUY profit lock requires a stop
   above entry; SELL profit lock requires a stop below entry.
 - A BUY closes when a fresh quote has `bid ≤ TS VIRT`; a SELL closes when a
@@ -198,9 +207,11 @@ reaches TS VIRT, the position is closed.
 
 State is written after every manage tick and on clean shutdown. A restart
 restores managed positions, the virtual stop, best price, trail distance and the
-emergency SL, then reconciles them against the broker. Agent-owned orphans are
-adopted from the trade log; positions the agent did not open are left alone
-unless the kill switch is active.
+emergency SL, then reconciles them against the broker. Every open position on
+the account is managed dynamically: unknown positions are adopted from broker
+data (entry, SL, volume, instrument conditions) and positions without an SL
+receive an ATR/spread-based emergency SL first. No manual entry or pre-existing
+bot history is required.
 
 ## Rate limits and resilience
 

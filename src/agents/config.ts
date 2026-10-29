@@ -153,8 +153,8 @@ export function loadAgentConfig(
     trailMinPips: num(env, "AGENT_TRAIL_MIN_PIPS", 4),
     // Once profit locks, cut the trailing distance so each favorable tick
     // captures more of the move. The distance can only shrink after activation.
-    profitTrailAtrFactor: Math.max(0.05, num(env, "AGENT_PROFIT_TRAIL_ATR", 0.65)),
-    profitTrailMinPips: Math.max(0.1, num(env, "AGENT_PROFIT_TRAIL_MIN_PIPS", 1.5)),
+    profitTrailAtrFactor: Math.max(0.05, num(env, "AGENT_PROFIT_TRAIL_ATR", 0.3)),
+    profitTrailMinPips: Math.max(0.1, num(env, "AGENT_PROFIT_TRAIL_MIN_PIPS", 0.5)),
     profitLockMinPips: Math.max(0, num(env, "AGENT_PROFIT_LOCK_MIN_PIPS", 1)),
     brokerStopUpdateMs: Math.max(1000, num(env, "AGENT_BROKER_STOP_UPDATE_MS", 10000)),
     brokerStopMoveMinPips: Math.max(0.1, num(env, "AGENT_BROKER_STOP_MOVE_MIN_PIPS", 2)),

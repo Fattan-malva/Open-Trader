@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { advanceVirtualStop, canMoveTrailStop, initialVirtualStop, isFreshQuote, profitTrailDistanceFromAtr, updateBest, virtualStopLocksProfit, virtualStopHit } from "./trailing.js";
+import { advanceVirtualStop, canMoveTrailStop, initialVirtualStop, isFreshQuote, profitLockCushion, profitLockStop, profitTrailDistanceFromAtr, updateBest, virtualStopLocksProfit, virtualStopHit } from "./trailing.js";
 
 function near(actual: number, expected: number): void {
   assert.ok(Math.abs(actual - expected) < 1e-9, `expected ${actual} to be close to ${expected}`);
@@ -73,6 +73,35 @@ test("first TS profit lock requires a buffer beyond entry", () => {
   assert.equal(canMoveTrailStop("buy", 1.1004, 1.1000, false, 0.0005), false);
   assert.equal(canMoveTrailStop("sell", 1.0995, 1.1000, false, 0.0005), true);
   assert.equal(canMoveTrailStop("sell", 1.0996, 1.1000, false, 0.0005), false);
+});
+
+test("profit lock cushion covers the entry spread plus the minimum gain", () => {
+  near(profitLockCushion(0.00012, 0.0001), 0.00022);
+  near(profitLockCushion(0, 0.0001), 0.0001);
+  near(profitLockCushion(0.0002, 0), 0.0002);
+  near(profitLockCushion(Number.NaN, -1), 0);
+});
+
+test("immediate profit lock sits beyond entry by the cushion", () => {
+  const cushion = profitLockCushion(0.00012, 0.0001);
+  near(profitLockStop("buy", 1.1000, cushion), 1.10022);
+  near(profitLockStop("sell", 1.1000, cushion), 1.09978);
+  assert.ok(Number.isNaN(profitLockStop("buy", 1.1000, 0)));
+  assert.ok(Number.isNaN(profitLockStop("sell", 0, cushion)));
+});
+
+test("tight post-lock trail chases a sustained move and never loosens", () => {
+  let best = 1.1000;
+  let stop = profitLockStop("buy", 1.1000, 0.0002);
+  const distance = 0.0003;
+  for (const bid of [1.1010, 1.1020, 1.1030, 1.1040]) {
+    best = updateBest("buy", best, bid, bid + 0.0001);
+    stop = advanceVirtualStop("buy", stop, best, distance);
+  }
+  near(stop, 1.1037);
+  const peak = stop;
+  best = updateBest("buy", best, 1.1025, 1.1026);
+  near(advanceVirtualStop("buy", stop, best, distance), peak);
 });
 
 test("post-lock trail distance tightens and never widens", () => {

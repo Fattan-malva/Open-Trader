@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { ExnessClient } from "../exness/client.js";
+import { digitsFor } from "../exness/catalog.js";
 import type { DealsHistoryResponse, Deal, Position, TransactionEvent } from "../exness/types.js";
 import { atr, lastFinite } from "../market/indicators.js";
 import { dropFormingCandle, pipSize, type NormalizedCandle } from "../market/candles.js";
@@ -22,10 +23,13 @@ import {
   canMoveTrailStop,
   initialVirtualStop,
   isFreshQuote,
+  profitLockCushion,
+  profitLockStop,
   profitTrailDistanceFromAtr,
   trailDistanceFromAtr,
   updateBest,
   virtualStopHit,
+  virtualStopLocksProfit,
   type PositionSide,
 } from "./trailing.js";
 
@@ -295,6 +299,11 @@ export class RiskExecutor {
   private readonly busy = new Set<string>();
   private readonly realized = new Map<string, number>();
   private readonly killAttempts = new Map<string, number>();
+  /** Recently closed position ids; prevents re-adopting a lagging snapshot row. */
+  private readonly recentlyFinalized = new Map<string, number>();
+  /** Backoff for positions that could not be adopted yet (missing data/API error). */
+  private readonly adoptRetryAt = new Map<string, number>();
+  private syncing = false;
   private trailing: Array<{ at: number; symbol: string; positionId: string; sl: number }> = [];
   private tradeLog: TradeLogEntry[] = [];
 
@@ -785,105 +794,208 @@ export class RiskExecutor {
   // ---------------------------------------------------------------- manage
 
   /**
-   * Re-attach positions the agent opened but lost from its managed map (state
-   * file removed, snapshot race after an open, or a restart mid-trade). The
-   * trade log is the source of truth for entry/initial stop, so adoption never
-   * touches positions that were not opened by this agent.
+   * Dynamic reconciliation: the broker snapshot is the source of truth. Any
+   * open position the bot does not track yet is adopted from broker data, no
+   * matter which terminal or person opened it. This removes the unmanaged-position
+   * entry gate and lets TS manage the whole account.
    */
-  private adoptOrphans(view: AccountView): void {
-    const known = new Set(this.managed.keys());
-    const opened = new Map<string, TradeLogEntry>();
-    for (const entry of this.tradeLog) {
-      if (entry.action === "open" && entry.positionId && entry.ok !== false) {
-        opened.set(entry.positionId, entry);
+  async syncPositions(view: AccountView): Promise<void> {
+    // Manage ticks and the scan loop can fire together. Serialize adoption so
+    // two callers never create (and pay for) the same emergency SL.
+    if (this.syncing) return;
+    this.syncing = true;
+    try {
+      const now = Date.now();
+      for (const [positionId, at] of this.recentlyFinalized) {
+        if (now - at > 60_000) this.recentlyFinalized.delete(positionId);
       }
-    }
-    for (const position of view.positions) {
-      if (known.has(position.position_id)) continue;
-      const entry = opened.get(position.position_id);
-      if (!entry || !entry.symbol || !entry.price || !entry.sl) continue;
-      if (entry.side !== position.direction) continue;
+      const openIds = new Set(view.positions.map((position) => position.position_id));
+      for (const positionId of [...this.adoptRetryAt.keys()]) {
+        if (!openIds.has(positionId)) this.adoptRetryAt.delete(positionId);
+      }
 
-      const symbol = entry.symbol;
-      const side: PositionSide = entry.side === "buy" ? "buy" : "sell";
-      const sign = side === "buy" ? 1 : -1;
-      const riskDistance = Math.abs(entry.price - entry.sl);
-      if (!(riskDistance > 0)) continue;
-      const sltp = view.orders.find(
-        (order) =>
-          order.order_type === "sltp" &&
-          order.position_id === position.position_id &&
-          order.state === "placed",
-      );
-      const brokerSl = Number(sltp?.stop_loss_price ?? 0);
-      const priceText = String(position.open_price ?? entry.price);
-      const digits = priceText.includes(".") ? priceText.split(".")[1]!.length : 5;
-      const pip = pipSize(symbol, digits);
-      // Old signals used a 1.5×ATR stop; reconstruct an approximate ATR so the
-      // new 2×ATR trail is in the right ballpark. Broker SL, if already moved,
-      // is kept as the virtual stop to preserve protection.
-      const approxAtr = riskDistance / Math.max(1, this.deps.config.emergencySlAtrFactor);
-      const trailDistance = trailDistanceFromAtr(
-        approxAtr,
-        this.deps.config.trailAtrFactor,
-        this.deps.config.trailMinPips * pip,
-      );
-      const emergency = Number(entry.sl) || brokerSl || entry.price - sign * riskDistance;
-      const initialStop = initialVirtualStop(side, entry.price, trailDistance);
-      const trailStop = brokerSl > 0
-        ? (side === "buy" ? Math.max(initialStop, brokerSl) : Math.min(initialStop, brokerSl))
-        : initialStop;
-
-      const originalStopPips = riskDistance / pip;
-      const originalVolume = Number(entry.volume) > 0 ? Number(entry.volume) : Number(position.volume);
-      const inferredPipValueUsdPerLot = Number(entry.riskUsd) > 0 && originalStopPips > 0 && originalVolume > 0
-        ? Number(entry.riskUsd) / (originalStopPips * originalVolume)
-        : undefined;
-      const managed: ManagedPosition = {
-        positionId: position.position_id,
-        symbol,
-        side,
-        entry: entry.price,
-        volume: Number(position.volume),
-        step: 0.01,
-        digits,
-        pip,
-        emergencySl: emergency,
-        slOrderId: sltp?.order_id,
-        trailStop,
-        trailDistance,
-        best: entry.price,
-        atr: approxAtr,
-        trailActivated: canMoveTrailStop(
-          side,
-          trailStop,
-          entry.price,
-          false,
-          this.deps.config.profitLockMinPips * pip,
-        ),
-        riskUsd: Number(entry.riskUsd) >= 0 ? Number(entry.riskUsd) : undefined,
-        pipValueUsdPerLot: inferredPipValueUsdPerLot,
-        lastBrokerStopMoveAt: 0,
-        openedAt: Date.parse(position.create_time) || entry.at,
-        lastAtrSyncAt: 0,
-        lastStopEnsureAt: 0,
-        score: 0,
-      };
-      this.managed.set(managed.positionId, managed);
-      this.log({
-        at: Date.now(),
-        action: "open",
-        symbol,
-        positionId: managed.positionId,
-        side,
-        volume: managed.volume,
-        price: managed.entry,
-        sl: managed.emergencySl,
-        reason: "adopted orphan position",
-        ok: true,
-      });
-      this.deps.log(`adopt ${symbol} ${side} ${managed.volume} lot (${managed.positionId})`);
+      for (const position of view.positions) {
+        if (position.state !== "open") continue;
+        if (this.managed.has(position.position_id)) continue;
+        if (this.recentlyFinalized.has(position.position_id)) continue;
+        if ((this.adoptRetryAt.get(position.position_id) ?? 0) > now) continue;
+        const adopted = await this.adoptPosition(position, view, now);
+        if (!adopted) this.adoptRetryAt.set(position.position_id, Date.now() + 30_000);
+      }
+    } finally {
+      this.syncing = false;
     }
+  }
+
+  /**
+   * Build a managed position from the broker snapshot. Missing broker SLs are
+   * created from ATR/spread immediately so the position is never left naked.
+   * Returns false when conditions or USD conversion are unavailable; the entry
+   * gate then stays closed until risk can be verified.
+   */
+  private async adoptPosition(
+    position: Position,
+    view: AccountView,
+    now: number,
+  ): Promise<boolean> {
+    const symbol = position.instrument;
+    const side: PositionSide = position.direction === "sell" ? "sell" : "buy";
+    const sign = side === "buy" ? 1 : -1;
+    const entry = parseNumber(position.open_price, 0);
+    const volume = parseNumber(position.volume, 0);
+    if (!(entry > 0) || !(volume > 0)) return false;
+
+    let conditions;
+    try {
+      conditions = await this.deps.tools.conditions(symbol);
+    } catch (error) {
+      this.deps.log(
+        `adopt ${symbol} deferred: conditions ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    }
+    const digits = Number(conditions.point_digits) || digitsFor(symbol);
+    const pip = pipSize(symbol, digits);
+    const step = parseNumber(conditions.volume_step, 0.01);
+    const contractSize = parseNumber(conditions.contract_size, 0);
+    if (!(contractSize > 0)) {
+      this.deps.log(`adopt ${symbol} deferred: contract size unavailable`);
+      return false;
+    }
+
+    const quoteCurrency = conditions.quote_currency ?? symbol.slice(3);
+    let quotes = new Map(this.deps.ticks.store.all().map((item) => [item.symbol, item] as const));
+    let quoteRate = quoteToUsdRate(quoteCurrency, quotes);
+    if (quoteRate === undefined && quoteCurrency !== "USD") {
+      await this.deps.ticks
+        .ensure([`${quoteCurrency}USD`, `USD${quoteCurrency}`], 1500)
+        .catch(() => []);
+      quotes = new Map(this.deps.ticks.store.all().map((item) => [item.symbol, item] as const));
+      quoteRate = quoteToUsdRate(quoteCurrency, quotes);
+    }
+    if (!(quoteRate && quoteRate > 0)) {
+      this.deps.log(`adopt ${symbol} deferred: no ${quoteCurrency}/USD conversion`);
+      return false;
+    }
+    const pipValueUsdPerLot = contractSize * pip * quoteRate;
+
+    // Fresh ATR gives the trail its natural distance. When candles are
+    // unavailable the broker stop (or configured minimum) is used instead.
+    let atrValue = 0;
+    const candles = await this.deps.marketTools.get_candles({
+      symbol,
+      timeframe: this.deps.config.trailTimeframe,
+      n: 60,
+    });
+    if (candles.ok) {
+      const closed = dropFormingCandle(
+        candles.data,
+        timeframeMs(this.deps.config.trailTimeframe),
+      );
+      const value = lastFinite(atr(closed, this.deps.config.trailAtrPeriod));
+      if (value !== undefined && value > 0) atrValue = value;
+    }
+
+    const sltp = view.orders.find(
+      (order) =>
+        order.order_type === "sltp" &&
+        order.position_id === position.position_id &&
+        order.state === "placed",
+    );
+    const brokerSl = parseNumber(
+      sltp?.stop_loss_price ?? position.stop_loss_price ?? undefined,
+      0,
+    );
+    const quote = this.deps.ticks.get(symbol);
+    const spread = Number(quote?.spread ?? 0);
+    let emergencySl = brokerSl;
+    let slOrderId = sltp?.order_id;
+    let createdStop = false;
+
+    if (!(emergencySl > 0)) {
+      const distance = Math.max(
+        atrValue > 0 ? this.deps.config.emergencySlAtrFactor * atrValue : 0,
+        this.deps.config.minStopPips * pip,
+        Number.isFinite(spread) ? spread * 3 : 0,
+      );
+      emergencySl = roundStopAway(entry - sign * distance, digits, side);
+      const result = await this.deps.tools.setSltp(position.position_id, emergencySl, digits);
+      if (!result.ok) {
+        this.deps.log(
+          `adopt ${symbol} deferred: emergency SL rejected ${result.errorMessage ?? result.status}`,
+        );
+        this.deps.tools.invalidateSnapshot();
+        return false;
+      }
+      slOrderId = result.data?.orders?.find((order) => order.order_type === "sltp")?.order_id;
+      createdStop = true;
+      this.deps.tools.invalidateSnapshot();
+    }
+
+    const stopDistance = Math.abs(entry - emergencySl);
+    const impliedAtr = atrValue > 0
+      ? atrValue
+      : Math.max(
+          stopDistance / Math.max(1, this.deps.config.emergencySlAtrFactor),
+          this.deps.config.trailMinPips * pip,
+        );
+    const trailDistance = trailDistanceFromAtr(
+      impliedAtr,
+      this.deps.config.trailAtrFactor,
+      this.deps.config.trailMinPips * pip,
+    );
+    const initialStop = initialVirtualStop(side, entry, trailDistance);
+    const trailStop = side === "buy"
+      ? Math.max(initialStop, emergencySl)
+      : Math.min(initialStop, emergencySl);
+    const best = quote
+      ? (side === "buy" ? Math.max(entry, quote.bid) : Math.min(entry, quote.ask))
+      : entry;
+
+    const managed: ManagedPosition = {
+      positionId: position.position_id,
+      symbol,
+      side,
+      entry,
+      volume,
+      step,
+      digits,
+      pip,
+      emergencySl,
+      slOrderId,
+      trailStop,
+      trailDistance,
+      best,
+      atr: impliedAtr,
+      trailActivated: virtualStopLocksProfit(side, trailStop, entry),
+      riskUsd: (stopDistance / pip) * volume * pipValueUsdPerLot,
+      pipValueUsdPerLot,
+      lastBrokerStopMoveAt: 0,
+      openedAt: Date.parse(position.create_time) || now,
+      lastAtrSyncAt: atrValue > 0 ? candleBoundary(this.deps.config.trailTimeframe, now) : 0,
+      lastStopEnsureAt: createdStop ? now : 0,
+      score: 0,
+    };
+    this.managed.set(managed.positionId, managed);
+    this.log({
+      at: now,
+      action: "open",
+      symbol,
+      positionId: managed.positionId,
+      side,
+      volume: managed.volume,
+      price: managed.entry,
+      sl: managed.emergencySl,
+      riskUsd: managed.riskUsd,
+      reason:
+        `dynamic adopt · broker ${sltp ? "SL" : "position"} · ` +
+        `risk ${Number(managed.riskUsd ?? 0).toFixed(2)} USD · trail ${(trailDistance / pip).toFixed(1)}p`,
+      ok: true,
+    });
+    this.deps.log(
+      `adopt ${symbol} ${side} ${managed.volume} lot (${managed.positionId}) · ${createdStop ? "SL created · " : ""}TS ${managed.trailStop}`,
+    );
+    return true;
   }
 
   /**
@@ -960,37 +1072,55 @@ export class RiskExecutor {
 
     const previousBest = managed.best;
     managed.best = updateBest(managed.side, managed.best, quote.bid, quote.ask);
+
+    // Lock profit the moment the executable side clears entry by the spread
+    // plus the configured minimum. Waiting for best - trailDistance would let
+    // a small winner turn into a loser before TS ever protects it.
+    const cushion = profitLockCushion(
+      Number.isFinite(quote.spread) ? quote.spread : 0,
+      this.deps.config.profitLockMinPips * managed.pip,
+    );
+    let activatedNow = false;
+    if (!managed.trailActivated && cushion > 0) {
+      const executable = managed.side === "buy" ? quote.bid : quote.ask;
+      const profit = managed.side === "buy"
+        ? executable - managed.entry
+        : managed.entry - executable;
+      const rawLock = profitLockStop(managed.side, managed.entry, cushion);
+      if (Number.isFinite(profit) && profit >= cushion && Number.isFinite(rawLock)) {
+        // Floor a BUY lock / ceil a SELL lock so rounding never shaves the cushion.
+        const factor = 10 ** managed.digits;
+        const lock = (managed.side === "buy"
+          ? Math.floor(rawLock * factor)
+          : Math.ceil(rawLock * factor)) / factor;
+        if (
+          canMoveTrailStop(managed.side, lock, managed.entry, false, 0) &&
+          improved(managed.side, lock, managed.trailStop, managed.pip / 100)
+        ) {
+          managed.trailStop = lock;
+          managed.trailActivated = true;
+          activatedNow = true;
+          this.log({
+            at: now,
+            action: "protect",
+            symbol: managed.symbol,
+            positionId: managed.positionId,
+            side: managed.side,
+            price: lock,
+            reason:
+              `TS VIRT locked ${(cushion / managed.pip).toFixed(1)}p beyond entry ` +
+              `(spread ${(quote.spread / managed.pip).toFixed(1)}p paid)`,
+            ok: true,
+          });
+        }
+      }
+    }
+
     this.advanceStop(
       managed,
       managed.best !== previousBest ? "best update" : "quote update",
       quote,
     );
-
-    const minimumProfitDistance = Math.max(
-      this.deps.config.profitLockMinPips * managed.pip,
-      Number.isFinite(quote.spread) && quote.spread > 0 ? quote.spread : 0,
-    );
-    const activatedNow = !managed.trailActivated &&
-      canMoveTrailStop(
-        managed.side,
-        managed.trailStop,
-        managed.entry,
-        false,
-        minimumProfitDistance,
-      );
-    if (activatedNow) {
-      managed.trailActivated = true;
-      this.log({
-        at: now,
-        action: "protect",
-        symbol: managed.symbol,
-        positionId: managed.positionId,
-        side: managed.side,
-        price: managed.trailStop,
-        reason: `TS VIRT profit locked beyond entry by ${(minimumProfitDistance / managed.pip).toFixed(1)}p`,
-        ok: true,
-      });
-    }
 
     if (managed.trailActivated) {
       this.tightenProfitTrailDistance(managed, quote, activatedNow ? "first profit lock" : "live tick");
@@ -1055,7 +1185,7 @@ export class RiskExecutor {
       return;
     }
 
-    this.adoptOrphans(view);
+    await this.syncPositions(view);
     for (const managed of [...this.managed.values()]) {
       const position = view.positions.find((entry) => entry.position_id === managed.positionId);
       if (!position) {
@@ -1221,9 +1351,9 @@ export class RiskExecutor {
     const spreadBuffer = Number.isFinite(currentQuote.spread) && currentQuote.spread > 0
       ? currentQuote.spread
       : 0;
-    const minimumProfitDistance = Math.max(
-      this.deps.config.profitLockMinPips * managed.pip,
+    const minimumProfitDistance = profitLockCushion(
       spreadBuffer,
+      this.deps.config.profitLockMinPips * managed.pip,
     );
     if (
       !canMoveTrailStop(
@@ -1456,6 +1586,9 @@ export class RiskExecutor {
     });
   }
   private async finalize(managed: ManagedPosition): Promise<void> {
+    // Snapshots can lag a close. Tombstone the id so the dynamic sync cannot
+    // re-adopt the same position while the broker row is still visible.
+    this.recentlyFinalized.set(managed.positionId, Date.now());
     let realized = this.realized.get(managed.positionId);
     if (realized === undefined) {
       realized = await this.dealHistoryProfit(managed);

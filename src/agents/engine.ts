@@ -403,6 +403,10 @@ export class AgentEngine {
         return;
       }
 
+      // Adopt any open broker position before the entry gate runs, so a
+      // position opened outside the bot no longer blocks new entries.
+      await this.deps.executor.syncPositions(view);
+
       // Every pair the screener passes is a candidate. Entry needs only the
       // last closed confirmation candle; there is no M5 step and no TP.
       const tried: string[] = [];

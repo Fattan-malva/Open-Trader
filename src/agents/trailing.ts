@@ -105,6 +105,29 @@ export function advanceVirtualStop(
 }
 
 /**
+ * Minimum profit (in price units) that must be secured before the first lock:
+ * the entry spread is already paid, so break-even needs spread + minimum gain.
+ * Closing at the lock still leaves a net gain after that spread.
+ */
+export function profitLockCushion(spread: number, minProfit: number): number {
+  const spreadCost = Number.isFinite(spread) && spread > 0 ? spread : 0;
+  const minimum = Number.isFinite(minProfit) && minProfit > 0 ? minProfit : 0;
+  return spreadCost + minimum;
+}
+
+/** The virtual stop that locks the cushion beyond entry. */
+export function profitLockStop(
+  side: PositionSide,
+  entry: number,
+  cushion: number,
+): number {
+  if (!Number.isFinite(entry) || entry <= 0 || !Number.isFinite(cushion) || cushion <= 0) {
+    return Number.NaN;
+  }
+  return side === "buy" ? entry + cushion : entry - cushion;
+}
+
+/**
  * True only when TS VIRT itself sits beyond entry in the profitable direction.
  * Uses executable-side price levels, not a fixed USD profit threshold.
  */
