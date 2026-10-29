@@ -9,6 +9,9 @@ import { assessSpread, spreadLabel } from "./spread.js";
 export interface EntryConfig {
   maxSpreadPips: number;
   maxSpreadPct: number;
+  maxMetalSpreadPct?: number;
+  maxCryptoSpreadPct?: number;
+  maxEnergySpreadPct?: number;
   maxSpreadSpikeRatio: number;
   maxSpreadTrailRatio: number;
   maxQuoteAgeMs: number;
@@ -194,6 +197,9 @@ export function entryConfigFrom(config: AgentConfig): EntryConfig {
   return {
     maxSpreadPips: config.maxSpreadPips,
     maxSpreadPct: config.maxSpreadPct,
+    maxMetalSpreadPct: config.maxMetalSpreadPct,
+    maxCryptoSpreadPct: config.maxCryptoSpreadPct,
+    maxEnergySpreadPct: config.maxEnergySpreadPct,
     maxSpreadSpikeRatio: config.maxSpreadSpikeRatio,
     maxSpreadTrailRatio: config.maxSpreadTrailRatio,
     maxQuoteAgeMs: config.maxQuoteAgeMs,
