@@ -120,7 +120,7 @@ export function assessSpread(
   const series = spreadHistory.get(symbol) ?? [];
   const baselineValues = series
     .filter((sample) => sample.at <= quote.timestamp - SAMPLE_INTERVAL_MS && quote.timestamp - sample.at <= HISTORY_WINDOW_MS)
-    .map((sample) => fx ? sample.value / pipSize(symbol) : sample.value);
+    .map((sample) => fx ? Number((sample.value / pipSize(symbol)).toFixed(8)) : sample.value);
   if (baselineValues.length >= MIN_BASELINE_SAMPLES) {
     const baseline = median(baselineValues);
     const spikeRatio = baseline > 0 ? value / baseline : 1;
