@@ -871,8 +871,16 @@ function agentLogLines(
   if (entries.length === 0) return [style.dim("· belum ada log")];
   return entries.slice(-limit).map((entry) => {
     const message = conciseAgentMessage(entry);
-    const text =
-      entry.tone === "error"
+    const closePnl = entry.agent === "trader"
+      ? message.match(/^CLOSE\\s+\\S+\\s+([+-]?\\d+(?:\\.\\d+)?)$/i)
+      : null;
+    const text = closePnl
+      ? Number(closePnl[1]) < 0
+        ? style.red(message)
+        : Number(closePnl[1]) > 0
+          ? style.green(message)
+          : style.dim(message)
+      : entry.tone === "error"
         ? style.red(message)
         : entry.tone === "warn"
           ? style.yellow(message)
