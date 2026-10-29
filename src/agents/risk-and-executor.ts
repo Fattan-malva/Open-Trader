@@ -29,6 +29,8 @@ import {
   type PositionSide,
 } from "./trailing.js";
 
+const TS_CLOSE_RETRY_MS = 1_500;
+
 export interface ManagedPosition {
   positionId: string;
   symbol: string;
@@ -61,6 +63,8 @@ export interface ManagedPosition {
   closing?: boolean;
   /** TS-triggered close request retained while another broker mutation is busy. */
   closeRequested?: string;
+  /** Prevent repeated market-close requests on every tick after a broker error. */
+  closeRetryAt?: number;
   /** Consecutive manage ticks where the broker snapshot did not show the position. */
   misses?: number;
   score: number;
@@ -318,6 +322,7 @@ export class RiskExecutor {
         score: Number(position.score) || 0,
         closing: false,
         closeRequested: typeof position.closeRequested === "string" ? position.closeRequested : undefined,
+        closeRetryAt: Number(position.closeRetryAt) > 0 ? Number(position.closeRetryAt) : undefined,
       });
     }
   }
@@ -1218,11 +1223,15 @@ export class RiskExecutor {
 
   private async closeFull(managed: ManagedPosition, reason: string): Promise<void> {
     if (managed.closing) return;
+    managed.closeRequested ??= reason;
+    const now = Date.now();
+    if (now < (managed.closeRetryAt ?? 0)) return;
     if (this.busy.has(managed.positionId)) {
-      managed.closeRequested ??= reason;
+      managed.closeRetryAt = now + TS_CLOSE_RETRY_MS;
       return;
     }
     managed.closing = true;
+    managed.closeRetryAt = now + TS_CLOSE_RETRY_MS;
     this.busy.add(managed.positionId);
     try {
       const result = await this.deps.tools.close(managed.positionId);
