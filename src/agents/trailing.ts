@@ -70,13 +70,16 @@ export function advanceVirtualStop(
 }
 
 /**
- * Gross-profit threshold for starting the profit lock.
- * Keep enough headroom above the configured lock so activation cannot
- * immediately place the virtual stop at/above the current executable price.
+ * True only when TS VIRT itself sits beyond entry in the profitable direction.
+ * Uses executable-side price levels, not a fixed USD profit threshold.
  */
-export function profitLockActivationThreshold(lockUsd: number): number {
-  const lock = Number.isFinite(lockUsd) && lockUsd > 0 ? lockUsd : 0;
-  return lock + Math.max(0.02, lock * 0.5);
+export function virtualStopLocksProfit(
+  side: PositionSide,
+  stop: number,
+  entry: number,
+): boolean {
+  if (!Number.isFinite(stop) || !Number.isFinite(entry) || entry <= 0) return false;
+  return side === "buy" ? stop > entry : stop < entry;
 }
 
 /**
