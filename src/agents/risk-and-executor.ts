@@ -421,7 +421,10 @@ export class RiskExecutor {
     ) {
       return { ok: false, reason: "emergency SL is not on the protective side of the current price" };
     }
-    const contractSize = parseNumber(conditions.contract_size, 100_000);
+    const contractSize = parseNumber(conditions.contract_size, 0);
+    if (!(contractSize > 0)) {
+      return { ok: false, reason: "instrument contract size unavailable; refusing unsafe sizing" };
+    }
     const volumeMin = parseNumber(conditions.volume_min, 0.01);
     const volumeMax = parseNumber(conditions.volume_max, 100);
     const volumeStep = parseNumber(conditions.volume_step, 0.01);
