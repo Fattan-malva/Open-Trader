@@ -413,7 +413,10 @@ export async function runDashboard(parsed: ParsedArgs): Promise<number> {
       });
 
       moveHome();
-      process.stdout.write(`${visible.join("\n")}\n${footer}\u001b[0J`);
+      // Clear each terminal row before redrawing it. Otherwise remnants from an
+      // earlier long log line remain to the right and look like a widened panel.
+      const frameRows = visible.map((line) => `\r\u001b[2K${line}`).join("\n");
+      process.stdout.write(`${frameRows}\n\r\u001b[2K${footer}\u001b[0J`);
     };
 
     const poll = async (): Promise<void> => {
