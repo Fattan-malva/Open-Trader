@@ -98,8 +98,8 @@ test("all agent containers keep the tallest ENTRY height when later logs are sho
   assert.ok(tallHeights[0]! > 6, "long ENTRY diagnostics should grow the cards");
   assert.deepEqual(tallHeights, [tallHeights[0], tallHeights[0], tallHeights[0]]);
   const plainTall = tallRendered.replace(/\u001b\[[0-9;]*m/g, "");
-  const scannerLogCount = (plainTall.match(/SCAN PAIR\\d+/g) ?? []).length;
-  const traderLogCount = (plainTall.match(/ADOPT PAIR\\d+/g) ?? []).length;
+  const scannerLogCount = (plainTall.match(/SCAN PAIR\d+/g) ?? []).length;
+  const traderLogCount = (plainTall.match(/ADOPT PAIR\d+/g) ?? []).length;
   assert.ok(scannerLogCount > 4, `SCREENER should use available space, got ${scannerLogCount} rows`);
   assert.ok(traderLogCount > 4, `TRADER should use available space, got ${traderLogCount} rows`);
   assert.ok(plainTall.includes("SCAN PAIR24"), "SCREENER should include its newest log row");
