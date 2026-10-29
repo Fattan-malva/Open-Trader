@@ -45,7 +45,7 @@ export interface AgentConfig {
   rsiMin: number;
   rsiMax: number;
 
-  /** risk capital used for sizing (demo balance is too large to size from) */
+  /** Legacy compatibility setting; live risk sizing reads the account snapshot. */
   /** Dynamic account-wide exposure limits. */
   maxOpenPositions: number;
   maxOpenRiskPct: number;
@@ -66,7 +66,7 @@ export interface AgentConfig {
   brokerStopUpdateMs: number;
   brokerStopMoveMinPips: number;
 
-  /** broker-side emergency stop: 3 × trend-timeframe ATR */
+  /** broker-side emergency stop: fast ATR multiple plus broker/spread floors */
   emergencySlAtrFactor: number;
   /** never place an emergency stop closer than this to the market */
   minStopPips: number;
