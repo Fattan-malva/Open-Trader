@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "tsx src/cli/index.ts dashboard",
-    "test": "node --import tsx --test src/agents/trailing.test.ts src/agents/spread.test.ts src/agents/screener-breakout.test.ts src/agents/screener-cache.test.ts src/agents/entry.test.ts src/agents/momentum.test.ts src/agents/reentry.test.ts",
+    "test": "node --import tsx --test src/agents/trailing.test.ts src/agents/spread.test.ts src/agents/screener-breakout.test.ts src/agents/screener-cache.test.ts src/agents/entry.test.ts src/agents/momentum.test.ts src/agents/reentry.test.ts src/agents/risk-and-executor.test.ts src/agents/screener-universe.test.ts src/cli/dashboard/panels.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
