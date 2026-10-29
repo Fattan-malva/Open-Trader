@@ -59,6 +59,8 @@ export interface ManagedPosition {
   lastStopEnsureAt: number;
   lastError?: string;
   closing?: boolean;
+  /** TS-triggered close request retained while another broker mutation is busy. */
+  closeRequested?: string;
   /** Consecutive manage ticks where the broker snapshot did not show the position. */
   misses?: number;
   score: number;
@@ -315,6 +317,7 @@ export class RiskExecutor {
         lastStopEnsureAt: 0,
         score: Number(position.score) || 0,
         closing: false,
+        closeRequested: typeof position.closeRequested === "string" ? position.closeRequested : undefined,
       });
     }
   }
@@ -820,10 +823,12 @@ export class RiskExecutor {
   }
 
   private processTrailingQuote(managed: ManagedPosition, quote: Quote, now: number): void {
-    if (
-      managed.closing ||
-      !isFreshQuote(quote.timestamp, now, this.deps.config.maxQuoteAgeMs)
-    ) return;
+    if (managed.closing) return;
+    if (managed.closeRequested) {
+      void this.closeFull(managed, managed.closeRequested);
+      return;
+    }
+    if (!isFreshQuote(quote.timestamp, now, this.deps.config.maxQuoteAgeMs)) return;
 
     const previousBest = managed.best;
     managed.best = updateBest(managed.side, managed.best, quote.bid, quote.ask);
@@ -864,7 +869,8 @@ export class RiskExecutor {
     // Closing is event-driven: the same fresh tick that touches the virtual
     // stop starts the close request without waiting for the next manage timer.
     if (virtualStopHit(managed.side, managed.trailStop, quote.bid, quote.ask)) {
-      void this.closeFull(managed, this.triggerReason(managed, quote));
+      managed.closeRequested ??= this.triggerReason(managed, quote);
+      void this.closeFull(managed, managed.closeRequested);
     }
   }
 
@@ -931,6 +937,13 @@ export class RiskExecutor {
         continue;
       }
       managed.misses = 0;
+
+      // A TS close remains mandatory after its trigger, even if the original
+      // quote has since retraced or another broker mutation temporarily blocked it.
+      if (managed.closeRequested && !managed.closing) {
+        await this.closeFull(managed, managed.closeRequested);
+        continue;
+      }
 
       const quote = this.deps.ticks.get(managed.symbol);
       if (!quote) continue;
@@ -1204,13 +1217,18 @@ export class RiskExecutor {
   }
 
   private async closeFull(managed: ManagedPosition, reason: string): Promise<void> {
-    if (managed.closing || this.busy.has(managed.positionId)) return;
+    if (managed.closing) return;
+    if (this.busy.has(managed.positionId)) {
+      managed.closeRequested ??= reason;
+      return;
+    }
     managed.closing = true;
     this.busy.add(managed.positionId);
     try {
       const result = await this.deps.tools.close(managed.positionId);
       if (!result.ok) {
         managed.closing = false;
+        managed.closeRequested ??= reason;
         managed.lastError = result.errorMessage ?? result.status;
         this.log({
           at: Date.now(),
