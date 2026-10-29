@@ -990,6 +990,7 @@ export function renderAgentLogLines(
     return [style.dim("  belum ada aktivitas agent · jalankan `npm start`")];
   }
   const lines = activity.map((entry) => {
+    const message = conciseAgentMessage(entry);
     // Closed P/L color follows the realized amount, not the generic log tone.
     const closePnl = entry.agent === "trader"
       ? message.match(/^CLOSE\s+\S+\s+([+-]?\d+(?:\.\d+)?)$/i)
