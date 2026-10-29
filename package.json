@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "tsx src/cli/index.ts dashboard",
-    "test": "node --import tsx --test src/agents/trailing.test.ts",
+    "test": "node --import tsx --test src/agents/trailing.test.ts src/agents/spread.test.ts src/agents/screener.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
