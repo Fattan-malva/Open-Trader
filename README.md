@@ -113,18 +113,18 @@ account.
 | Scan alignment | M1 close + 2 s | `AGENT_SCAN_INTERVAL_MS` (fallback) |
 | Manage cadence | 1 s | `AGENT_MANAGE_INTERVAL_MS` |
 | Shortlist / candidates | 16 / 16 | `AGENT_SHORTLIST`, `AGENT_MAX_CANDIDATES` |
-| Minimum score | 18 | `AGENT_MIN_SCORE` |
-| RSI band | 25–75 | `AGENT_RSI_MIN`, `AGENT_RSI_MAX` |
-| Pullback to M1 EMA50 | ≤ 2×ATR | `AGENT_PULLBACK_ATR` |
-| M15 trend separation | ≥ 0.01×ATR | `AGENT_MIN_TREND_ATR` |
-| FX / non-FX spread | ≤ 6 pips / ≤ 0.10% | `AGENT_MAX_SPREAD_PIPS`, `AGENT_MAX_SPREAD_PCT` |
-| Spread cost | ≤ 45% of trail | `AGENT_MAX_SPREAD_TRAIL` |
+| Minimum score | 16 | `AGENT_MIN_SCORE` |
+| RSI band | 30–70 | `AGENT_RSI_MIN`, `AGENT_RSI_MAX` |
+| Pullback to M1 EMA50 | ≤ 1.8×ATR | `AGENT_PULLBACK_ATR` |
+| M15 trend separation | ≥ 0.008×ATR | `AGENT_MIN_TREND_ATR` |
+| FX / non-FX spread | ≤ 5 pips / ≤ 0.08% | `AGENT_MAX_SPREAD_PIPS`, `AGENT_MAX_SPREAD_PCT` |
+| Spread cost | ≤ 40% of trail | `AGENT_MAX_SPREAD_TRAIL` |
 | Virtual trail | max(1.2×M1 ATR, 4 pips) | `AGENT_TRAIL_ATR`, `AGENT_TRAIL_MIN_PIPS` |
 | Broker emergency SL | 1.5×M1 ATR, min 6 pips / 3× spread | `AGENT_EMERGENCY_SL_ATR`, `AGENT_MIN_STOP_PIPS` |
 | Profit-lock trigger / minimum lock | $0.30 estimated gross / $0.10 | `AGENT_TRAIL_PROFIT_ACTIVATION_USD`, `AGENT_TRAIL_PROFIT_LOCK_USD` |
 | Broker SL update cadence / minimum move | 10 s / 2 pips | `AGENT_BROKER_STOP_UPDATE_MS`, `AGENT_BROKER_STOP_MOVE_MIN_PIPS` |
-| Max chase | 3×ATR | `AGENT_MAX_CHASE_ATR` |
-| Max quote age | 15 s | `AGENT_MAX_QUOTE_AGE_MS` |
+| Max chase | 2×ATR | `AGENT_MAX_CHASE_ATR` |
+| Max quote age | 8 s | `AGENT_MAX_QUOTE_AGE_MS` |
 | Sizing equity | min(actual balance, equity), converted to USD | account snapshot + market quotes |
 | Risk per trade | 0.5% of actual account capital | `AGENT_RISK_PCT` |
 | Max lots per trade | 0.5 | `AGENT_MAX_LOTS` |
@@ -219,7 +219,7 @@ src/
 ├─ agents/
 │  ├─ config.ts           thresholds and sizing
 │  ├─ screener.ts         M15 trend + M1 pullback + spread prefilter/ranking
-│  ├─ entry.ts            M1 confirmation gate, 3×M15-ATR emergency stop, M1 trail
+│  ├─ entry.ts            M1 confirmation gate, fast-ATR emergency stop, M1 trail
 │  ├─ spread.ts           FX pip limit / non-FX percentage limit
 │  ├─ risk-and-executor.ts sizing, gating, virtual trailing, adoption, kill close
 │  ├─ engine.ts           M1 scan loop, manage loop, watchdog, state writer
