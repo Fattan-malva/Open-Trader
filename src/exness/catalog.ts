@@ -4,7 +4,7 @@ import path from "node:path";
 import type { ExnessClient } from "./client.js";
 import type { InstrumentConditions, InstrumentListResponse } from "./types.js";
 
-export type InstrumentCategory = "fx" | "metals" | "crypto" | "index" | "stock" | "other";
+export type InstrumentCategory = "fx" | "metals" | "energy" | "crypto" | "index" | "stock" | "other";
 
 export interface Catalog {
   fetchedAt: number;
@@ -16,11 +16,19 @@ export interface Catalog {
  * The public API does not serve stock or index instruments. Keep them in the
  * catalog for display, but never subscribe to their ticks or scan them.
  */
-const COMMODITY = /^(XAU|XAG|XPT|XPD|XAL|XCU|XNG|XNI|XPB|XZN|USOIL|UKOIL|XBR|XTI)/;
+const METALS = /^(XAU|XAG|XPT|XPD|XAL|XCU|XNI|XPB|XZN)/;
+const ENERGY = /^(XNG|USOIL|UKOIL|XBR|XTI|NGAS|NATGAS|BRENT|WTI)/;
 const CRYPTO_BASES = [
   "BTC", "ETH", "BCH", "LTC", "XRP", "ADA", "SOL", "DOT", "DOGE", "AVAX",
   "LINK", "UNI", "TRX", "MATIC", "SHIB", "ATOM", "EOS", "XLM", "XMR", "ZEC",
   "DASH", "ETC", "BNB", "APT", "ARB", "OP", "SUI", "PEPE", "USDT", "USDC",
+  "AAVE", "ALGO", "APE", "AR", "CRV", "FIL", "FET", "GALA", "HBAR", "ICP",
+  "IMX", "INJ", "KAS", "KAVA", "LDO", "MKR", "NEAR", "ONDO", "ORDI", "POL",
+  "QNT", "RENDER", "RUNE", "SEI", "STX", "THETA", "TON", "TIA", "VET", "WIF",
+  "WLD", "ZK", "ZRO", "JUP", "JTO", "ENA", "STRK", "EGLD", "FLOW", "MINA",
+  "XTZ", "SAND", "MANA", "AXS", "CHZ", "COMP", "SNX", "YFI", "ZIL", "BAT",
+  "ENS", "GMT", "MASK", "IOTA", "NEO", "WAVES", "QTUM", "KSM", "CELO", "ROSE",
+  "ANKR", "BLUR", "DYDX", "LRC", "1INCH", "BONK", "BOME", "FLOKI", "TRUMP", "TAO",
 ];
 const CRYPTO_QUOTES = new Set([
   "USD", "EUR", "JPY", "GBP", "CHF", "AUD", "NZD", "CAD", "CNH", "KRW",
@@ -38,8 +46,10 @@ function isCrypto(symbol: string): boolean {
 }
 
 export function categorize(symbol: string): InstrumentCategory {
-  if (COMMODITY.test(symbol)) return "metals";
-  if (isCrypto(symbol)) return "crypto";
+  const upper = symbol.toUpperCase();
+  if (METALS.test(upper)) return "metals";
+  if (ENERGY.test(upper)) return "energy";
+  if (isCrypto(upper)) return "crypto";
   if (/^[A-Z]{6}$/.test(symbol)) return "fx";
   if (/\d/.test(symbol)) return "index";
   return "stock";
@@ -47,12 +57,15 @@ export function categorize(symbol: string): InstrumentCategory {
 
 /** Instruments the public API can stream and trade. */
 export function apiInstruments(catalog: Catalog): string[] {
-  return [
+  // Only include categories the public market-data/trading API can stream.
+  // Deduplicate the server catalogue and preserve its broker-provided symbols.
+  return [...new Set([
     ...catalog.byCategory.fx,
     ...catalog.byCategory.metals,
+    ...catalog.byCategory.energy,
     ...catalog.byCategory.crypto,
     ...catalog.byCategory.other,
-  ];
+  ])];
 }
 
 /** Display precision heuristic, used when instrument conditions are not cached yet. */
@@ -96,7 +109,7 @@ export class CatalogService {
         this.catalogFile,
       );
       if (cached && Date.now() - cached.fetchedAt < CATALOG_TTL_MS && Array.isArray(cached.instruments)) {
-        this.cachedCatalog = cached.byCategory
+        this.cachedCatalog = cached.byCategory && Array.isArray(cached.byCategory.energy)
           ? (cached as Catalog)
           : buildCatalog(cached.instruments, cached.fetchedAt);
         return this.cachedCatalog;
@@ -149,6 +162,7 @@ export function buildCatalog(instruments: string[], fetchedAt = Date.now()): Cat
   const byCategory: Record<InstrumentCategory, string[]> = {
     fx: [],
     metals: [],
+    energy: [],
     crypto: [],
     index: [],
     stock: [],
