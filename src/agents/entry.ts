@@ -27,7 +27,7 @@ export interface EntrySignal {
   side: Direction;
   /** live reference price at decision time */
   entry: number;
-  /** distant broker-side stop, sized from trend-timeframe ATR */
+  /** Broker emergency stop, based on fast ATR and the broker/spread minimums. */
   emergencySl: number;
   digits: number;
   pip: number;
@@ -53,8 +53,8 @@ export interface EntryDecision {
  * The screener has already checked the trend EMA50/EMA200, screener RSI,
  * distance to screener EMA50, ATR range and spread. Entry has one job: require
  * the last closed confirmation candle to agree with the trend direction, then
- * derive the broker emergency stop from the higher-timeframe ATR and the
- * virtual trail from the faster ATR. There is deliberately no take-profit.
+ * derive the broker emergency stop from fast ATR and broker/spread minimums.
+ * There is deliberately no take-profit.
  */
 export function decideEntry(input: {
   candidate: Candidate;
