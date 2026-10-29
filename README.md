@@ -8,7 +8,7 @@ npm install
 npm start
 ```
 
-`npm start` renders the full-screen board and starts the M1/M15 agent against
+`npm start` renders the full-screen board and starts the fast M1/M5 agent against
 the account in `.env`. It is demo-first and deterministic (plain TypeScript
 rules, no LLM). Use it on a demo account while tuning; profitability is not
 guaranteed.
