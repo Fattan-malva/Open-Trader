@@ -1005,6 +1005,22 @@ function traderPanelLines(agent: AgentStateFile | null | undefined): string[] {
   return withLog("TRADER", head, agentLogLines(agent, "trader", 4));
 }
 
+// Keep the agent cards at the tallest height reached during this dashboard
+// session. ENTRY log reasons can wrap across many rows; the other cards should
+// grow with it, and none of the three should collapse again when logs get shorter.
+let retainedAgentPanelContentHeight = 0;
+
+function equalizeAgentPanelLines(lines: string[][]): string[][] {
+  retainedAgentPanelContentHeight = Math.max(
+    retainedAgentPanelContentHeight,
+    ...lines.map((entry) => entry.length),
+  );
+  return lines.map((entry) => [
+    ...entry,
+    ...Array.from({ length: retainedAgentPanelContentHeight - entry.length }, () => ""),
+  ]);
+}
+
 export function renderAgentContainers(
   agent: AgentStateFile | null | undefined,
   width: number,
@@ -1012,19 +1028,29 @@ export function renderAgentContainers(
   const status = agent?.running ? "live" : "idle";
   if (width >= 96) {
     const widths = splitWidths(width, 3, 1);
+    const [screenerLines, entryLines, traderLines] = equalizeAgentPanelLines([
+      screenerPanelLines(agent),
+      entryPanelLines(agent, widths[1]!),
+      traderPanelLines(agent),
+    ]);
     return row(
       [
-        panel(`SCREENER · ${status}`, screenerPanelLines(agent), widths[0]!, "cyan"),
-        panel(`ENTRY · ${status}`, entryPanelLines(agent, widths[1]!), widths[1]!, "green"),
-        panel(`TRADER · ${status}`, traderPanelLines(agent), widths[2]!, "yellow"),
+        panel(`SCREENER · ${status}`, screenerLines!, widths[0]!, "cyan"),
+        panel(`ENTRY · ${status}`, entryLines!, widths[1]!, "green"),
+        panel(`TRADER · ${status}`, traderLines!, widths[2]!, "yellow"),
       ],
       " ",
     );
   }
+  const [screenerLines, entryLines, traderLines] = equalizeAgentPanelLines([
+    screenerPanelLines(agent),
+    entryPanelLines(agent, width),
+    traderPanelLines(agent),
+  ]);
   return [
-    panel(`SCREENER · ${status}`, screenerPanelLines(agent), width, "cyan"),
-    panel(`ENTRY · ${status}`, entryPanelLines(agent, width), width, "green"),
-    panel(`TRADER · ${status}`, traderPanelLines(agent), width, "yellow"),
+    panel(`SCREENER · ${status}`, screenerLines!, width, "cyan"),
+    panel(`ENTRY · ${status}`, entryLines!, width, "green"),
+    panel(`TRADER · ${status}`, traderLines!, width, "yellow"),
   ].join("\n");
 }
 
