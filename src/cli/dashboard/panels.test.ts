@@ -160,8 +160,8 @@ test("a very long final ENTRY message never expands dashboard rows beyond termin
   } as unknown as DashboardState;
 
   const width = 90;
-  const output = renderDashboard(state, { width, height: 42 }).replace(/\\u001b\\[[0-9;]*m/g, "");
-  const overflow = output.split("\\n").map((line) => line.length).filter((length) => length > width);
+  const output = renderDashboard(state, { width, height: 42 }).replace(/\u001b\[[0-9;]*m/g, "");
+  const overflow = output.split("\n").map((line) => line.length).filter((length) => length > width);
   assert.deepEqual(overflow, [], `rendered dashboard rows must stay within ${width} columns`);
   assert.ok(output.includes("BROKER_REJECT_REASON"), "the long ENTRY reason must remain visible");
 });
