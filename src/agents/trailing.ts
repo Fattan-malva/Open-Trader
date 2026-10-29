@@ -28,15 +28,17 @@ export function trailDistanceFromAtr(atr: number, atrFactor: number, minDistance
 }
 
 /**
- * Initial virtual stop - starts at emergency SL level
+ * Initial virtual stop is anchored to the actual fill and a fast-ATR distance.
+ * It must not inherit the wider broker emergency SL.
  */
 export function initialVirtualStop(
   side: PositionSide,
   entry: number,
-  emergencySl: number,
+  trailDistance: number,
 ): number {
-  if (Number.isFinite(emergencySl) && emergencySl > 0) return emergencySl;
-  return entry;
+  if (!Number.isFinite(entry) || entry <= 0) return Number.NaN;
+  const distance = Number.isFinite(trailDistance) && trailDistance > 0 ? trailDistance : 0;
+  return side === "buy" ? entry - distance : entry + distance;
 }
 
 /** The stop implied by the recorded best price and current trail distance. */
