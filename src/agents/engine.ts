@@ -38,6 +38,7 @@ export interface AgentStateFile {
     candidates: Array<{
       symbol: string;
       direction: string;
+      setupType: string;
       score: number;
       spreadPct: number;
       spreadPips: number;
@@ -164,6 +165,7 @@ export class AgentEngine {
         `screener ${this.deps.config.screenerTimeframe} · trend ${this.deps.config.trendTimeframe} · ` +
         `confirm ${this.deps.config.confirmTimeframe} · trail ${this.deps.config.trailTimeframe} · ` +
         `risk ${this.deps.config.riskPct}% of live account equity · ` +
+        `spread cap ${this.deps.config.maxSpreadPips}p / ${this.deps.config.maxSpreadPct}% · spike guard ${this.deps.config.maxSpreadSpikeRatio}× · ` +
         `position cap ${this.deps.config.maxOpenPositions} · aggregate risk ${this.deps.config.maxOpenRiskPct}% · ` +
         `emergency ${this.deps.config.emergencySlAtrFactor}×M1 ATR · ` +
         `trail ${this.deps.config.trailAtrFactor}×ATR (min ${this.deps.config.trailMinPips}p)`,
@@ -318,7 +320,7 @@ export class AgentEngine {
       this.record(
         "screener",
         `fresh ${diagnostics.fresh}/${diagnostics.withQuote} · prefilter ${diagnostics.prefiltered} · ` +
-          `shortlist ${diagnostics.shortlist} · candle fail ${diagnostics.candleFails} · pass ${diagnostics.passed}`,
+          `shortlist ${diagnostics.shortlist} · candle fail ${diagnostics.candleFails} · spread reject ${diagnostics.spreadRejected} (${diagnostics.spreadSpikeRejected} spikes) · pass ${diagnostics.passed}`,
       );
       if (diagnostics.top.length > 0) {
         this.record(
@@ -333,7 +335,7 @@ export class AgentEngine {
         "screener",
         `scan ${((Date.now() - started) / 1000).toFixed(1)}s · ${candidates.length} kandidat` +
           (candidates[0]
-            ? ` · ${candidates[0].symbol} ${candidates[0].direction} ${candidates[0].score.toFixed(0)}`
+            ? ` · ${candidates[0].symbol} ${candidates[0].direction} ${candidates[0].setupType} ${candidates[0].score.toFixed(0)}`
             : "") +
           (gate.ok ? "" : ` · ${gate.reason}`),
         gate.ok ? "success" : "warn",
@@ -369,14 +371,14 @@ export class AgentEngine {
           confirmCandles: confirmation.candles,
         });
         if (!decision.signal) {
-          tried.push(`${candidate.symbol}: ${decision.rejects[0] ?? "no signal"}`);
+          tried.push(`${candidate.symbol}: ${decision.rejects.slice(0, 2).join("; ") || "no signal"}`);
           continue;
         }
 
         this.lastSignal = decision.signal;
         this.record(
           "entry",
-          `sinyal ${decision.signal.side.toUpperCase()} ${candidate.symbol} ` +
+          `sinyal ${decision.signal.side.toUpperCase()} ${candidate.symbol} [${candidate.setupType}] ` +
             `entry ${decision.signal.entry} emergency SL ${decision.signal.emergencySl} ` +
             `trail ${decision.signal.trailDistance.toFixed(5)} ` +
             `(${decision.signal.slPips.toFixed(1)}p)`,
@@ -495,6 +497,7 @@ export class AgentEngine {
         candidates: this.candidates.map((candidate) => ({
           symbol: candidate.symbol,
           direction: candidate.direction,
+          setupType: candidate.setupType,
           score: Number(candidate.score.toFixed(1)),
           spreadPct: Number(candidate.spreadPct.toFixed(4)),
           spreadPips: Number(candidate.spreadPips.toFixed(2)),
