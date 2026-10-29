@@ -104,8 +104,19 @@ export function canMoveTrailStop(
   nextStop: number,
   entry: number,
   alreadyLocked: boolean,
+  minimumProfitDistance = 0,
 ): boolean {
-  return alreadyLocked || virtualStopLocksProfit(side, nextStop, entry);
+  if (alreadyLocked) return true;
+  if (
+    !Number.isFinite(nextStop) ||
+    !Number.isFinite(entry) ||
+    entry <= 0 ||
+    !Number.isFinite(minimumProfitDistance) ||
+    minimumProfitDistance < 0
+  ) return false;
+  return side === "buy"
+    ? nextStop >= entry + minimumProfitDistance
+    : nextStop <= entry - minimumProfitDistance;
 }
 
 /**
