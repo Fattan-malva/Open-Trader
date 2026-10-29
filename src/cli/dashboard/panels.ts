@@ -934,7 +934,7 @@ function withLog(title: string, lines: string[], log: string[]): string[] {
   return [...lines, style.dim("─".repeat(Math.max(4, title.length))) , ...log];
 }
 
-function screenerPanelLines(agent: AgentStateFile | null | undefined): string[] {
+function screenerPanelLines(agent: AgentStateFile | null | undefined, logLimit = 4): string[] {
   if (!agent) {
     return [
       style.dim("belum ada agent-state.json"),
@@ -957,7 +957,7 @@ function screenerPanelLines(agent: AgentStateFile | null | undefined): string[] 
       ? `pass ${diagnostics.passed ?? 0} · fail ${diagnostics.candleFails ?? 0} · ${age} lalu`
       : style.dim("menunggu scan pertama"),
   ];
-  return withLog("SCREENER", head, agentLogLines(agent, "screener", 4));
+  return withLog("SCREENER", head, agentLogLines(agent, "screener", logLimit));
 }
 
 function entryPanelLines(agent: AgentStateFile | null | undefined, width: number): string[] {
@@ -983,7 +983,7 @@ function entryPanelLines(agent: AgentStateFile | null | undefined, width: number
   return withLog("ENTRY", head, agentLogLines(agent, "entry", 4, Math.max(8, width - 4)));
 }
 
-function traderPanelLines(agent: AgentStateFile | null | undefined): string[] {
+function traderPanelLines(agent: AgentStateFile | null | undefined, logLimit = 4): string[] {
   if (!agent) {
     return [
       style.dim("belum ada posisi dikelola"),
@@ -1002,7 +1002,7 @@ function traderPanelLines(agent: AgentStateFile | null | undefined): string[] {
       `${stats?.wins ?? 0}W/${stats?.losses ?? 0}L`,
     `net ${formatSignedMoney(stats?.netProfit ?? 0)} · daily ${formatSignedMoney(agent.dailyPnl ?? 0)}`,
   ];
-  return withLog("TRADER", head, agentLogLines(agent, "trader", 4));
+  return withLog("TRADER", head, agentLogLines(agent, "trader", logLimit));
 }
 
 // Keep the agent cards at the tallest height reached during this dashboard
@@ -1026,26 +1026,55 @@ export function renderAgentContainers(
   width: number,
 ): string {
   const status = agent?.running ? "live" : "idle";
-  if (width >= 96) {
-    const widths = splitWidths(width, 3, 1);
+  const renderCards = (screenerWidth: number, entryWidth: number, traderWidth: number): string => {
+    const entry = entryPanelLines(agent, entryWidth);
+    // Set the retained panel height using ENTRY's full wrapped diagnostics and
+    // the baseline header/log rows. Use the remaining rows for as many recent
+    // SCREENER/TRADER records as are available, rather than a fixed four each.
+    const baseline = [
+      screenerPanelLines(agent, 1),
+      entry,
+      traderPanelLines(agent, 1),
+    ];
+    retainedAgentPanelContentHeight = Math.max(
+      retainedAgentPanelContentHeight,
+      ...baseline.map((lines) => lines.length),
+    );
+    const logRows = Math.max(1, retainedAgentPanelContentHeight - 4);
     const [screenerLines, entryLines, traderLines] = equalizeAgentPanelLines([
-      screenerPanelLines(agent),
-      entryPanelLines(agent, widths[1]!),
-      traderPanelLines(agent),
+      screenerPanelLines(agent, logRows),
+      entry,
+      traderPanelLines(agent, logRows),
     ]);
     return row(
       [
-        panel(`SCREENER · ${status}`, screenerLines!, widths[0]!, "cyan"),
-        panel(`ENTRY · ${status}`, entryLines!, widths[1]!, "green"),
-        panel(`TRADER · ${status}`, traderLines!, widths[2]!, "yellow"),
+        panel(`SCREENER · ${status}`, screenerLines!, screenerWidth, "cyan"),
+        panel(`ENTRY · ${status}`, entryLines!, entryWidth, "green"),
+        panel(`TRADER · ${status}`, traderLines!, traderWidth, "yellow"),
       ],
       " ",
     );
+  };
+
+  if (width >= 96) {
+    const widths = splitWidths(width, 3, 1);
+    return renderCards(widths[0]!, widths[1]!, widths[2]!);
   }
+
+  // Stacked layout still shares the same height high-water mark, while each
+  // card keeps its own width and receives the full available log rows.
+  const entry = entryPanelLines(agent, width);
+  retainedAgentPanelContentHeight = Math.max(
+    retainedAgentPanelContentHeight,
+    entry.length,
+    screenerPanelLines(agent, 1).length,
+    traderPanelLines(agent, 1).length,
+  );
+  const logRows = Math.max(1, retainedAgentPanelContentHeight - 4);
   const [screenerLines, entryLines, traderLines] = equalizeAgentPanelLines([
-    screenerPanelLines(agent),
-    entryPanelLines(agent, width),
-    traderPanelLines(agent),
+    screenerPanelLines(agent, logRows),
+    entry,
+    traderPanelLines(agent, logRows),
   ]);
   return [
     panel(`SCREENER · ${status}`, screenerLines!, width, "cyan"),
