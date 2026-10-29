@@ -40,7 +40,7 @@ test("ENTRY panel keeps full reject reasons and wraps them to continuation rows"
 
 
 function renderedPanelHeights(rendered: string): number[] {
-  const lines = rendered.replace(/\\u001b\\[[0-9;]*m/g, "").split("\\n");
+  const lines = rendered.replace(/\u001b\[[0-9;]*m/g, "").split("\n");
   const starts = lines
     .map((line, index) => line.startsWith("╭") ? index : -1)
     .filter((index) => index >= 0);
