@@ -823,7 +823,7 @@ function conciseAgentMessage(entry: AgentActivity): string {
     }
     const lock = message.match(/profit-lock activated.*?\+?([0-9.]+) USD/i);
     if (lock) return `TS ${symbol ?? "?"} +${Number(lock[1]).toFixed(2)}`;
-    const opened = message.match(/open ([A-Z0-9._-]+) (buy|sell) ([0-9.]+) lot(?: @ ([0-9.]+))?(?: #([A-Z0-9._-]+))?/i);
+    const opened = message.match(/open ([A-Z0-9._-]+) (buy|sell) ([0-9.]+) lot(?: @ ([0-9.]+))?(?:.*?#([A-Z0-9._-]+))?/i);
     if (opened) return `OPEN ${opened[1]} ${opened[2].toUpperCase()} ${opened[3]}L${opened[4] ? ` @ ${opened[4]}` : ""}${opened[5] ? ` #${opened[5]}` : ""}`;
     const updated = message.match(/TS Updated\s+([0-9.]+)\s*→\s*([0-9.]+)/i);
     const trail = message.match(/→\s*([0-9.]+)/);
