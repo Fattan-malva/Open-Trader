@@ -171,7 +171,7 @@ export class AgentEngine {
         `confirm ${this.deps.config.confirmTimeframe} · trail ${this.deps.config.trailTimeframe} · ` +
         `risk ${this.deps.config.riskPct}% of live account equity · ` +
         `spread cap ${this.deps.config.maxSpreadPips}p / ${this.deps.config.maxSpreadPct}% · spike guard ${this.deps.config.maxSpreadSpikeRatio}× · ` +
-        `position cap ${this.deps.config.maxOpenPositions} · aggregate risk ${this.deps.config.maxOpenRiskPct}% · ` +
+        `aggregate open-risk cap ${this.deps.config.maxOpenRiskPct}% · ` +
         `emergency ${this.deps.config.emergencySlAtrFactor}×M1 ATR · ` +
         `trail ${this.deps.config.trailAtrFactor}×ATR (min ${this.deps.config.trailMinPips}p)`,
     );
@@ -395,7 +395,7 @@ export class AgentEngine {
           continue;
         }
 
-        // Refresh the snapshot so margin and per-symbol limits see the
+        // Refresh the snapshot so margin and aggregate-risk checks include
         // positions opened earlier in this same scan.
         view = await this.deps.snapshot.get();
         const opened = await this.deps.executor.open(decision.signal, view);
