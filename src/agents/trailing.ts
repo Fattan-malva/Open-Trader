@@ -1,5 +1,17 @@
 export type PositionSide = "buy" | "sell";
 
+/** A TS trigger must be based on a recent, non-future market quote. */
+export function isFreshQuote(timestamp: number, now: number, maxAgeMs: number): boolean {
+  return (
+    Number.isFinite(timestamp) &&
+    Number.isFinite(now) &&
+    Number.isFinite(maxAgeMs) &&
+    maxAgeMs >= 0 &&
+    now - timestamp <= maxAgeMs &&
+    timestamp - now <= 1_000
+  );
+}
+
 /**
  * New best price for a position, never moving backwards.
  * BUY tracks the highest bid; SELL tracks the lowest ask.
