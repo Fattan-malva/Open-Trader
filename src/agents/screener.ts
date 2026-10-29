@@ -547,7 +547,6 @@ export class Screener {
     this.lastScanAt = started;
 
     const now = Date.now();
-    type Pre = { quote: Quote; mom5: number | null; prelim: number };
     const pre: RankedSymbol[] = [];
     let withQuote = 0;
     let fresh = 0;
