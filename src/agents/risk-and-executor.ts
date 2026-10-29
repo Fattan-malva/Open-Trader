@@ -803,6 +803,116 @@ export class RiskExecutor {
     }
   }
 
+  /**
+   * Consume each incoming tick so virtual TS is not limited to the slower
+   * account-snapshot management cadence. The manager loop remains responsible
+   * for broker-SL synchronization and ATR refreshes.
+   */
+  onQuote(quote: Quote): void {
+    if (!this.deps.live || this.killActive()) return;
+    const now = Date.now();
+    if (!isFreshQuote(quote.timestamp, now, this.deps.config.maxQuoteAgeMs)) return;
+
+    for (const managed of this.managed.values()) {
+      if (managed.symbol !== quote.symbol || managed.closing) continue;
+      this.processTrailingQuote(managed, quote, now);
+    }
+  }
+
+  private processTrailingQuote(managed: ManagedPosition, quote: Quote, now: number): void {
+    if (
+      managed.closing ||
+      !isFreshQuote(quote.timestamp, now, this.deps.config.maxQuoteAgeMs)
+    ) return;
+
+    const previousBest = managed.best;
+    managed.best = updateBest(managed.side, managed.best, quote.bid, quote.ask);
+    if (managed.best !== previousBest) {
+      this.advanceStop(managed, "best update");
+    }
+
+    const minimumProfitDistance = Math.max(
+      this.deps.config.profitLockMinPips * managed.pip,
+      Number.isFinite(quote.spread) && quote.spread > 0 ? quote.spread : 0,
+    );
+    const activatedNow = !managed.trailActivated &&
+      canMoveTrailStop(
+        managed.side,
+        managed.trailStop,
+        managed.entry,
+        false,
+        minimumProfitDistance,
+      );
+    if (activatedNow) {
+      managed.trailActivated = true;
+      this.log({
+        at: now,
+        action: "protect",
+        symbol: managed.symbol,
+        positionId: managed.positionId,
+        side: managed.side,
+        price: managed.trailStop,
+        reason: `TS VIRT profit locked beyond entry by ${(minimumProfitDistance / managed.pip).toFixed(1)}p`,
+        ok: true,
+      });
+    }
+
+    if (managed.trailActivated) {
+      this.tightenProfitTrailDistance(managed, quote, activatedNow ? "first profit lock" : "live tick");
+    }
+
+    // Closing is event-driven: the same fresh tick that touches the virtual
+    // stop starts the close request without waiting for the next manage timer.
+    if (virtualStopHit(managed.side, managed.trailStop, quote.bid, quote.ask)) {
+      void this.closeFull(managed, this.triggerReason(managed, quote));
+    }
+  }
+
+  /**
+   * After profit lock, reduce the trailing distance aggressively. The distance
+   * may shrink as ATR/spread conditions improve, but can never widen again.
+   */
+  private tightenProfitTrailDistance(
+    managed: ManagedPosition,
+    quote: Quote,
+    why: string,
+  ): void {
+    if (!managed.trailActivated || managed.closing || !(managed.atr > 0)) return;
+
+    const atrDistance = trailDistanceFromAtr(
+      managed.atr,
+      this.deps.config.profitTrailAtrFactor,
+      this.deps.config.profitTrailMinPips * managed.pip,
+    );
+    const spreadFloor = Number.isFinite(quote.spread) && quote.spread > 0
+      ? quote.spread * 1.1
+      : 0;
+    const desiredDistance = Math.max(atrDistance, spreadFloor);
+    const nextDistance = Math.min(managed.trailDistance, desiredDistance);
+    const minimumChange = managed.pip / 100;
+    if (
+      !Number.isFinite(nextDistance) ||
+      nextDistance <= 0 ||
+      managed.trailDistance - nextDistance < minimumChange
+    ) return;
+
+    const previousDistance = managed.trailDistance;
+    managed.trailDistance = nextDistance;
+    this.log({
+      at: Date.now(),
+      action: "trail",
+      symbol: managed.symbol,
+      positionId: managed.positionId,
+      side: managed.side,
+      sl: managed.trailStop,
+      reason: `TS profit distance ${(previousDistance / managed.pip).toFixed(1)}p → ${(nextDistance / managed.pip).toFixed(1)}p (${why})`,
+      ok: true,
+    });
+    // The distance change can move the stop closer to the best price. The
+    // advanceVirtualStop ratchet guarantees the level itself never backs off.
+    this.advanceStop(managed, "profit trail tighten");
+  }
+
   async manage(view: AccountView): Promise<void> {
     // Dry-run is strictly read-only. It must never create an SLTP, trail a
     // broker position, or close anything, even when .cache/KILL is present.
