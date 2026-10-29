@@ -22,13 +22,14 @@ every 2 s ──► fast screener (M5 trend + cached M1 pullback/breakout + adap
           ──► trader (dynamic virtual trailing, no TP)
 ```
 
-- **Screener** ranks fresh quotes every 2 seconds. It screens up to 20 active
-  symbols per pass and requests M1/M5 candle history asynchronously into a cache;
-  the scan loop does not wait for rate-limited candle requests. Stocks and indices
-  are excluded because the public API does not serve them. Closed-candle
-  pullbacks and momentum breakouts are scored from cached history.
-  Spread caps are instrument-aware and each symbol develops its own rolling spread baseline;
-  sudden spread spikes are rejected after the baseline warms up.
+- **Screener** ranks fresh quotes every 2 seconds. The shortlist reserves capacity
+  for FX, metals, crypto and energy instead of allowing one category to dominate;
+  XAUUSD is pinned whenever it has a fresh quote within the hard spread cap, while
+  remaining category slots rotate so quieter supported symbols are eventually scanned.
+  M1/M5 candle history remains asynchronous and cached. Stocks and indices remain
+  excluded because the current public trading/market-data API path does not serve them.
+  Metal, crypto and energy spread caps can be tuned independently, with a per-symbol
+  rolling baseline and spike guard still in force.
 - **Entry** validates the selected setup, confirmation candle, RSI exhaustion, signal-distance,
   spread cost versus TS VIRT distance, and the latest executable quote. The executor rechecks
   spread and executable price immediately before order submission.
@@ -124,7 +125,8 @@ account.
 | Pullback RSI band | 20–80 | `AGENT_RSI_MIN`, `AGENT_RSI_MAX` |
 | Pullback to M1 EMA50 | ≤ 3.0×ATR | `AGENT_PULLBACK_ATR` |
 | M5 trend separation | ≥ 0.003×ATR | `AGENT_MIN_TREND_ATR` |
-| FX / non-FX hard spread cap | ≤ 5 pips / ≤ 0.08% | `AGENT_MAX_SPREAD_PIPS`, `AGENT_MAX_SPREAD_PCT` |
+| FX / generic non-FX spread cap | ≤ 5 pips / ≤ 0.08% | `AGENT_MAX_SPREAD_PIPS`, `AGENT_MAX_SPREAD_PCT` |
+| Metal / crypto / energy spread caps | ≤ 0.12% / ≤ 0.20% / ≤ 0.12% | `AGENT_MAX_METAL_SPREAD_PCT`, `AGENT_MAX_CRYPTO_SPREAD_PCT`, `AGENT_MAX_ENERGY_SPREAD_PCT` |
 | Per-symbol spread spike guard | ≤ 2.5× rolling median | `AGENT_MAX_SPREAD_SPIKE_RATIO` |
 | Breakout range / candle body | 5 bars / ≥ 0.08×ATR | `AGENT_BREAKOUT_LOOKBACK`, `AGENT_BREAKOUT_BODY_ATR` |
 | Breakout RSI exhaustion | BUY ≤ 82 / SELL ≥ 18 | `AGENT_BREAKOUT_RSI_CEILING`, `AGENT_BREAKOUT_RSI_FLOOR` |
@@ -141,7 +143,8 @@ account.
 | Max lots per trade | 0.5 | `AGENT_MAX_LOTS` |
 | Re-entry trigger | new valid closed candle or favourable move ≥ max(0.2×ATR, 1 pip) | `AGENT_REENTRY_STEP_ATR`, `AGENT_REENTRY_MIN_PIPS` |
 | Same-symbol entries | No fixed per-symbol or total-position count; aggregate risk/margin still cap exposure | executor |
-| Aggregate open-risk cap | 2% of account equity | `AGENT_MAX_OPEN_RISK_PCT` |
+| Aggregate open-risk cap | 2% of account equity, re-sized to remaining budget | `AGENT_MAX_OPEN_RISK_PCT` |
+| Open risk calculation | Current confirmed broker SL and stored USD pip value; TS VIRT never reduces risk | executor |
 | Daily-loss entry cutoff | 3% of day-start balance | `AGENT_MAX_DAILY_LOSS_PCT` |
 | Free-margin reserve | 25% plus 3× margin buffer | `AGENT_MARGIN_RESERVE_PCT`, `AGENT_MARGIN_BUFFER` |
 
