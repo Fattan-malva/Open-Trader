@@ -26,7 +26,9 @@ test("ENTRY panel keeps full reject reasons and wraps them to continuation rows"
     executor: { managed: [], stats: {}, trailing: [], tradeLog: [] },
   } as unknown as AgentStateFile;
 
-  const rendered = renderAgentContainers(agent, 120).replace(/\u001b\[[0-9;]*m/g, "");
+  // Narrow mode stacks panels vertically, so assertion text is not interleaved
+  // with neighbouring panel columns on each wrapped row.
+  const rendered = renderAgentContainers(agent, 90).replace(/\u001b\[[0-9;]*m/g, "");
   const normalized = rendered.replace(/\s*↳\s*/g, " ").replace(/\s+/g, " ");
   assert.ok(normalized.includes(message), "the complete original entry message must be visible");
   assert.match(rendered, /↳ /, "wrapped continuation rows must have a marker");
