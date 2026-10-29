@@ -26,7 +26,7 @@ interface SpreadSample {
 const spreadHistory = new Map<string, SpreadSample[]>();
 const SAMPLE_INTERVAL_MS = 1_000;
 const HISTORY_WINDOW_MS = 15 * 60_000;
-const MAX_SAMPLES = 180;
+const MAX_SAMPLES = 900;
 const MIN_BASELINE_SAMPLES = 8;
 
 /** Spread converted to pips. Only meaningful for FX; used for FX limits. */
