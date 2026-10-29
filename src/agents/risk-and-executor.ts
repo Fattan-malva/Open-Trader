@@ -337,6 +337,21 @@ export class RiskExecutor {
     }
     if (view.tradeMode !== "enabled") return { ok: false, reason: `trade_mode ${view.tradeMode}` };
     if (view.status !== "active") return { ok: false, reason: `status ${view.status}` };
+    if (this.deps.config.maxDailyLossPct > 0 && view.equity > 0) {
+      const today = new Date().toDateString();
+      const firstToday = this.deps.equity.samples.find(
+        (sample) => new Date(sample.t).toDateString() === today,
+      );
+      const dayStart = firstToday?.balance ?? view.balance;
+      const loss = dayStart - view.equity;
+      const limit = dayStart * this.deps.config.maxDailyLossPct / 100;
+      if (dayStart > 0 && loss >= limit) {
+        return {
+          ok: false,
+          reason: `daily loss limit reached ${loss.toFixed(2)} / ${limit.toFixed(2)} ${view.currency}; new entries paused`,
+        };
+      }
+    }
     return { ok: true };
   }
 
@@ -388,6 +403,12 @@ export class RiskExecutor {
     // Round the emergency stop with the broker's real precision, away from the
     // entry. This is the exact value sent in the order and shown on the board.
     const emergencySl = roundStopAway(signal.emergencySl, digits, signal.side);
+    if (
+      (signal.side === "buy" && emergencySl >= execution) ||
+      (signal.side === "sell" && emergencySl <= execution)
+    ) {
+      return { ok: false, reason: "emergency SL is no longer on the protective side of the current price" };
+    }
     const contractSize = parseNumber(conditions.contract_size, 100_000);
     const volumeMin = parseNumber(conditions.volume_min, 0.01);
     const volumeMax = parseNumber(conditions.volume_max, 100);
@@ -529,7 +550,7 @@ export class RiskExecutor {
       symbol: signal.symbol,
       side: signal.side,
       entry,
-      volume: Number(position.volume),
+      volume: Number(position.volume) > 0 ? Number(position.volume) : finalLots,
       step: volumeStep,
       digits,
       pip,
@@ -540,8 +561,8 @@ export class RiskExecutor {
       best: signal.side === "buy" ? Math.max(entry, quote.bid) : Math.min(entry, quote.ask),
       atr: signal.atr,
       trailActivated: false,
-      profitPerPriceUnitUsd: contractSize * quoteRate * Number(position.volume),
-      riskUsd: Number(position.volume) * sizingSlPips * pipValuePerLot,
+      profitPerPriceUnitUsd: contractSize * quoteRate * (Number(position.volume) > 0 ? Number(position.volume) : finalLots),
+      riskUsd: (Number(position.volume) > 0 ? Number(position.volume) : finalLots) * sizingSlPips * pipValuePerLot,
       lastBrokerStopMoveAt: 0,
       lastValuationAttemptAt: 0,
       openedAt: Date.now(),
