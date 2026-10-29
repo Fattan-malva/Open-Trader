@@ -67,6 +67,11 @@ export interface AgentConfig {
 
   maxQuoteAgeMs: number;
   maxChaseAtr: number;
+
+  /** Minimum favourable price advance before a same-candle re-entry. */
+  reentryStepAtr: number;
+  /** Minimum re-entry price step, even when ATR is unusually small. */
+  reentryMinPips: number;
 }
 
 function num(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
@@ -85,25 +90,31 @@ function timeframe(
   return raw && isTimeframe(raw) ? raw : fallback;
 }
 
+function bool(env: NodeJS.ProcessEnv, key: string, fallback: boolean): boolean {
+  const raw = env[key]?.trim().toLowerCase();
+  if (!raw) return fallback;
+  return ["1", "true", "yes", "on"].includes(raw);
+}
+
 export function loadAgentConfig(
   env: NodeJS.ProcessEnv = process.env,
   overrides: Partial<AgentConfig> = {},
 ): AgentConfig {
   const defaults: AgentConfig = {
-    scanIntervalMs: Math.max(1_000, num(env, "AGENT_SCAN_INTERVAL_MS", 30_000)),
-    alignScanToCandle: true,
+    scanIntervalMs: Math.max(1_000, num(env, "AGENT_SCAN_INTERVAL_MS", 2_000)),
+    alignScanToCandle: bool(env, "AGENT_ALIGN_SCAN_TO_CANDLE", false),
     manageIntervalMs: Math.max(250, num(env, "AGENT_MANAGE_INTERVAL_MS", 1_000)),
 
     screenerTimeframe: timeframe(env, "AGENT_SCREENER_TF", "M1"),
-    trendTimeframe: timeframe(env, "AGENT_TREND_TF", "M15"),
+    trendTimeframe: timeframe(env, "AGENT_TREND_TF", "M5"),
     confirmTimeframe: timeframe(env, "AGENT_CONFIRM_TF", "M1"),
     trailTimeframe: timeframe(env, "AGENT_TRAIL_TF", "M1"),
 
     // Wider ranking net plus a lower, but still positive, score gate finds more
     // opportunities without raising risk or bypassing hard execution filters.
     shortlistSize: Math.max(1, Math.trunc(num(env, "AGENT_SHORTLIST", 20))),
-    maxCandidates: Math.max(1, Math.trunc(num(env, "AGENT_MAX_CANDIDATES", 16))),
-    minScore: num(env, "AGENT_MIN_SCORE", 16),
+    maxCandidates: Math.max(1, Math.trunc(num(env, "AGENT_MAX_CANDIDATES", 20))),
+    minScore: num(env, "AGENT_MIN_SCORE", 10),
 
     maxSpreadPips: num(env, "AGENT_MAX_SPREAD_PIPS", 5),
     maxSpreadPct: num(env, "AGENT_MAX_SPREAD_PCT", 0.08),
@@ -111,17 +122,17 @@ export function loadAgentConfig(
     maxSpreadTrailRatio: num(env, "AGENT_MAX_SPREAD_TRAIL", 0.4),
     minAtrPct: num(env, "AGENT_MIN_ATR_PCT", 0.0025),
     maxAtrPct: num(env, "AGENT_MAX_ATR_PCT", 1.8),
-    pullbackDistanceAtr: num(env, "AGENT_PULLBACK_ATR", 2.2),
-    minTrendAtr: num(env, "AGENT_MIN_TREND_ATR", 0.006),
-    rsiMin: num(env, "AGENT_RSI_MIN", 27),
-    rsiMax: num(env, "AGENT_RSI_MAX", 73),
-    breakoutLookback: Math.max(3, Math.trunc(num(env, "AGENT_BREAKOUT_LOOKBACK", 10))),
-    breakoutMinBodyAtr: Math.max(0.05, num(env, "AGENT_BREAKOUT_BODY_ATR", 0.15)),
+    pullbackDistanceAtr: num(env, "AGENT_PULLBACK_ATR", 3),
+    minTrendAtr: num(env, "AGENT_MIN_TREND_ATR", 0.003),
+    rsiMin: num(env, "AGENT_RSI_MIN", 20),
+    rsiMax: num(env, "AGENT_RSI_MAX", 80),
+    breakoutLookback: Math.max(3, Math.trunc(num(env, "AGENT_BREAKOUT_LOOKBACK", 5))),
+    breakoutMinBodyAtr: Math.max(0.05, num(env, "AGENT_BREAKOUT_BODY_ATR", 0.08)),
     breakoutRsiFloor: num(env, "AGENT_BREAKOUT_RSI_FLOOR", 18),
     breakoutRsiCeiling: num(env, "AGENT_BREAKOUT_RSI_CEILING", 82),
 
     virtualEquity: num(env, "EXNESS_VIRTUAL_EQUITY", 10_000),
-    riskPct: Math.max(0.01, num(env, "AGENT_RISK_PCT", 0.5)),
+    riskPct: Math.max(0.01, num(env, "AGENT_RISK_PCT", 0.1)),
     maxLotsPerTrade: num(env, "AGENT_MAX_LOTS", 0.5),
     marginBuffer: Math.max(1, num(env, "AGENT_MARGIN_BUFFER", 3)),
     maxOpenRiskPct: Math.max(0.1, num(env, "AGENT_MAX_OPEN_RISK_PCT", 2)),
@@ -144,6 +155,8 @@ export function loadAgentConfig(
 
     maxQuoteAgeMs: num(env, "AGENT_MAX_QUOTE_AGE_MS", 8000),
     maxChaseAtr: num(env, "AGENT_MAX_CHASE_ATR", 1.5),
+    reentryStepAtr: Math.max(0.01, num(env, "AGENT_REENTRY_STEP_ATR", 0.2)),
+    reentryMinPips: Math.max(0.1, num(env, "AGENT_REENTRY_MIN_PIPS", 1)),
   };
 
   return { ...defaults, ...overrides };
