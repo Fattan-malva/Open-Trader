@@ -33,8 +33,10 @@ M1 close ──► screener (M15 trend + M1 pullback/breakout + adaptive spread)
   spread and executable price immediately before order submission.
 - **Risk** sizes from current account balance/equity (converted to USD for
   sizing), validates actual account leverage, caps volume by available free
-  margin while reserving a buffer, and enforces position, aggregate-risk, and
-  daily-loss limits. It opens a market order with a **broker emergency stop-loss**
+  margin while reserving a buffer, and enforces aggregate open-risk and
+  daily-loss limits. Valid setups can add repeated entries on the same symbol;
+  no fixed total-position count is imposed. It opens a market order with a
+  **broker emergency stop-loss**
   and never sends a take-profit.
 - **Trader** starts TS VIRT from the actual fill and fast-ATR distance rather
   than copying the distant emergency SL. It follows the best executable price
@@ -136,7 +138,6 @@ account.
 | Sizing equity | min(actual balance, equity), converted to USD | account snapshot + market quotes |
 | Risk per trade | 0.5% of actual account capital | `AGENT_RISK_PCT` |
 | Max lots per trade | 0.5 | `AGENT_MAX_LOTS` |
-| Simultaneous positions | 3 | `AGENT_MAX_OPEN_POSITIONS` |
 | Aggregate open-risk cap | 2% of account equity | `AGENT_MAX_OPEN_RISK_PCT` |
 | Daily-loss entry cutoff | 3% of day-start balance | `AGENT_MAX_DAILY_LOSS_PCT` |
 | Free-margin reserve | 25% plus 3× margin buffer | `AGENT_MARGIN_RESERVE_PCT`, `AGENT_MARGIN_BUFFER` |
