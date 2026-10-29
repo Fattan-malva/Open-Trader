@@ -37,5 +37,8 @@ export function shouldOpenReentry(input: ReentryTriggerInput): boolean {
   const favourableMove = side === "buy"
     ? price - previous.price
     : previous.price - price;
-  return favourableMove >= step;
+  // Price differences such as 1.1002 - 1.1 can land infinitesimally
+  // below the exact decimal threshold in binary floating-point.
+  const epsilon = Math.max(1e-12, Math.abs(price) * Number.EPSILON * 4);
+  return favourableMove + epsilon >= step;
 }
