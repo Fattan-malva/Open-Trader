@@ -20,7 +20,6 @@ import {
   spreadLabel,
   spreadPips,
   spreadQuality,
-  spreadWithinLimit,
 } from "./spread.js";
 import { trailDistanceFromAtr } from "./trailing.js";
 
