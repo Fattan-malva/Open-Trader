@@ -33,7 +33,13 @@ import {
   type PositionSide,
 } from "./trailing.js";
 
-const TS_CLOSE_BUSY_RETRY_MS = 100;
+/**
+ * TS_CLOSE_BUSY_RETRY_MS: when a close request is queued but a broker mutation
+ * (usually an emergency-SL update) is still awaiting acknowledgement, retry the
+ * close at this cadence. 10ms means the close fires as soon as the busy lock
+ * releases — no extra latency beyond the in-flight REST call itself.
+ */
+const TS_CLOSE_BUSY_RETRY_MS = 10;
 const TS_CLOSE_RETRY_BASE_MS = 250;
 const TS_CLOSE_RETRY_MAX_MS = 5_000;
 
@@ -283,6 +289,26 @@ function roundStopAway(value: number, digits: number, side: PositionSide): numbe
 
 function improved(side: PositionSide, next: number, current: number, epsilon: number): boolean {
   return side === "buy" ? next > current + epsilon : next < current - epsilon;
+}
+
+/**
+ * Progressive trail-tightening factor.
+ *
+ * The base factor is `profitTrailAtrFactor`. As the position's peak profit
+ * (measured in ATRs) grows, the effective factor shrinks so the trail moves
+ * closer to price:
+ *
+ *   peak 0.0 ATR -> factor × 1.00
+ *   peak 1.0 ATR -> factor × 0.60
+ *   peak 2.0+ ATR -> factor × 0.30  (floor)
+ *
+ * The floor prevents the trail distance from collapsing to zero during a
+ * runaway move, which would make the stop jump on every tick.
+ */
+function profitTrailFactorMultiplier(progressAtr: number): number {
+  const p = Math.max(0, Math.min(2, progressAtr));
+  // 40% reduction by 1 ATR, then another 30% reduction by 2 ATR.
+  return Math.max(0.3, 1 - p * 0.4 + Math.max(0, p - 1) * 0.1);
 }
 
 export class RiskExecutor {
@@ -936,9 +962,9 @@ export class RiskExecutor {
     const impliedAtr = atrValue > 0
       ? atrValue
       : Math.max(
-          stopDistance / Math.max(1, this.deps.config.emergencySlAtrFactor),
-          this.deps.config.trailMinPips * pip,
-        );
+        stopDistance / Math.max(1, this.deps.config.emergencySlAtrFactor),
+        this.deps.config.trailMinPips * pip,
+      );
     const trailDistance = trailDistanceFromAtr(
       impliedAtr,
       this.deps.config.trailAtrFactor,
@@ -1064,6 +1090,9 @@ export class RiskExecutor {
 
   private processTrailingQuote(managed: ManagedPosition, quote: Quote, now: number): void {
     if (managed.closing) return;
+    // Once close was requested, we stop all trail/SL logic and just keep
+    // retrying the close. This is what guarantees the position actually exits
+    // after TS fires, even if the first attempt was rejected or busy.
     if (managed.closeRequested) {
       void this.closeFull(managed, managed.closeRequested);
       return;
@@ -1073,9 +1102,10 @@ export class RiskExecutor {
     const previousBest = managed.best;
     managed.best = updateBest(managed.side, managed.best, quote.bid, quote.ask);
 
-    // Lock profit the moment the executable side clears entry by the spread
-    // plus the configured minimum. Waiting for best - trailDistance would let
-    // a small winner turn into a loser before TS ever protects it.
+    // First profit lock: fires the moment executable price clears
+    // (spread + profitLockMinPips) beyond entry. After this, the ordinary
+    // best-based trail takes over and the trailActivated ratchet keeps the
+    // stop from slipping back below entry.
     const cushion = profitLockCushion(
       Number.isFinite(quote.spread) ? quote.spread : 0,
       this.deps.config.profitLockMinPips * managed.pip,
@@ -1116,6 +1146,9 @@ export class RiskExecutor {
       }
     }
 
+    // Ratchet the stop to best - trailDistance whenever possible. Because
+    // tightenProfitTrailDistance runs right below, a big new best usually
+    // produces a closer stop on the *same* tick.
     this.advanceStop(
       managed,
       managed.best !== previousBest ? "best update" : "quote update",
@@ -1128,6 +1161,8 @@ export class RiskExecutor {
 
     // Closing is event-driven: the same fresh tick that touches the virtual
     // stop starts the close request without waiting for the next manage timer.
+    // Once closeRequested is set, this branch will keep firing on every tick
+    // until the broker confirms.
     if (virtualStopHit(managed.side, managed.trailStop, quote.bid, quote.ask)) {
       managed.closeRequested ??= this.triggerReason(managed, quote);
       void this.closeFull(managed, managed.closeRequested);
@@ -1135,22 +1170,48 @@ export class RiskExecutor {
   }
 
   /**
-   * After profit lock, reduce the trailing distance aggressively. The distance
-   * may shrink as ATR/spread conditions improve, but can never widen again.
+   * Progressive tightening of the virtual trail distance after profit-lock.
+   *
+   * The distance can only shrink — never widen — once profit-lock is active.
+   * Uses the position's PEAK profit (best - entry) so a brief pullback does
+   * not loosen the trail, and multiplies `profitTrailAtrFactor` by
+   * `profitTrailFactorMultiplier(progressAtr)` so trail gets tighter as the
+   * trade keeps running:
+   *
+   *   profit 0 ATR  -> distance = profitTrailAtrFactor  x ATR  (loosest)
+   *   profit 1 ATR  -> distance = 0.60 × base
+   *   profit 2+ ATR -> distance = 0.30 × base            (tightest)
+   *
+   * Also enforces a floor of `max(profitTrailMinPips, spread × 1.1)` so the
+   * distance never collapses inside the spread and turns the TS into a
+   * spread-paid stop.
    */
   private tightenProfitTrailDistance(
     managed: ManagedPosition,
     quote: Quote,
     why: string,
   ): void {
-    if (!managed.trailActivated || managed.closing || !(managed.atr > 0)) return;
+    if (!managed.trailActivated || managed.closing || managed.closeRequested) return;
+    if (!(managed.atr > 0)) return;
+
+    // Use peak profit (from managed.best) so a brief retracement does not
+    // loosen the trail. best is already the highest bid / lowest ask seen.
+    const bestProfit = managed.side === "buy"
+      ? managed.best - managed.entry
+      : managed.entry - managed.best;
+    const profitPips = Math.max(0, bestProfit / managed.pip);
+    const atrPips = Math.max(managed.atr / managed.pip, managed.pip);
+    const progressAtr = profitPips / atrPips;
+
+    const shrink = profitTrailFactorMultiplier(progressAtr);
+    const effectiveFactor = this.deps.config.profitTrailAtrFactor * shrink;
 
     const nextDistance = profitTrailDistanceFromAtr(
       managed.trailDistance,
       managed.atr,
-      this.deps.config.profitTrailAtrFactor,
+      effectiveFactor,
       this.deps.config.profitTrailMinPips * managed.pip,
-      quote.spread,
+      Number.isFinite(quote.spread) ? quote.spread : 0,
     );
     const minimumChange = managed.pip / 100;
     if (
@@ -1168,11 +1229,13 @@ export class RiskExecutor {
       positionId: managed.positionId,
       side: managed.side,
       sl: managed.trailStop,
-      reason: `TS profit distance ${(previousDistance / managed.pip).toFixed(1)}p → ${(nextDistance / managed.pip).toFixed(1)}p (${why})`,
+      reason:
+        `TS profit distance ${(previousDistance / managed.pip).toFixed(1)}p → ` +
+        `${(nextDistance / managed.pip).toFixed(1)}p ` +
+        `(${why}, peak ${profitPips.toFixed(1)}p / ${atrPips.toFixed(1)}p ATR × ${shrink.toFixed(2)})`,
       ok: true,
     });
-    // The distance change can move the stop closer to the best price. The
-    // advanceVirtualStop ratchet guarantees the level itself never backs off.
+    // Distance shrank → ratchet the stop closer right away on this same tick.
     this.advanceStop(managed, "profit trail tighten", quote);
   }
 
@@ -1227,6 +1290,7 @@ export class RiskExecutor {
         }
       } else if (
         !managed.closing &&
+        !managed.closeRequested &&
         now - managed.openedAt > 10_000 &&
         now - managed.lastStopEnsureAt >= this.deps.config.stopEnsureRetryMs
       ) {
@@ -1234,7 +1298,7 @@ export class RiskExecutor {
       }
 
       // ATR distance is refreshed once per trail timeframe close; virtual stop
-      // advances on every favorable tick and never moves backwards
+      // advances on every favorable tick and never moves backwards.
       const boundary = candleBoundary(this.deps.config.trailTimeframe, now);
       if (managed.lastAtrSyncAt < boundary) {
         managed.lastAtrSyncAt = boundary;
@@ -1253,15 +1317,30 @@ export class RiskExecutor {
       }
 
       this.processTrailingQuote(managed, currentQuote, quoteNow);
-      if (!managed.closing && managed.trailActivated) {
+      // Never mutate the broker SL while a close is pending: an in-flight SL
+      // update would hold the `busy` lock and delay the market close.
+      if (
+        !managed.closing &&
+        !managed.closeRequested &&
+        managed.trailActivated
+      ) {
         await this.tightenEmergencyStop(managed, currentQuote);
       }
     }
   }
 
-  /** Move broker emergency SL only in the protective direction after profit lock. */
+  /**
+   * Move broker emergency SL only in the protective direction after profit lock.
+   * Skipped entirely when a close is pending or the position is already busy.
+   */
   private async tightenEmergencyStop(managed: ManagedPosition, quote: Quote): Promise<void> {
-    if (!managed.trailActivated || !managed.slOrderId || managed.closing || this.busy.has(managed.positionId)) {
+    if (
+      !managed.trailActivated ||
+      !managed.slOrderId ||
+      managed.closing ||
+      managed.closeRequested ||
+      this.busy.has(managed.positionId)
+    ) {
       return;
     }
     const now = Date.now();
@@ -1327,7 +1406,7 @@ export class RiskExecutor {
   }
 
   private advanceStop(managed: ManagedPosition, why: string, quote?: Quote): void {
-    if (managed.closing) return;
+    if (managed.closing || managed.closeRequested) return;
     let next = advanceVirtualStop(
       managed.side,
       managed.trailStop,
@@ -1389,7 +1468,7 @@ export class RiskExecutor {
   }
 
   private async refreshTrailDistance(managed: ManagedPosition): Promise<void> {
-    if (managed.closing) return;
+    if (managed.closing || managed.closeRequested) return;
     const result = await this.deps.marketTools.get_candles({
       symbol: managed.symbol,
       timeframe: this.deps.config.trailTimeframe,
@@ -1424,12 +1503,12 @@ export class RiskExecutor {
     const quote = this.deps.ticks.get(managed.symbol);
     const distance = managed.trailActivated
       ? profitTrailDistanceFromAtr(
-          managed.trailDistance,
-          atrValue,
-          this.deps.config.profitTrailAtrFactor,
-          this.deps.config.profitTrailMinPips * managed.pip,
-          quote?.spread ?? 0,
-        )
+        managed.trailDistance,
+        atrValue,
+        this.deps.config.profitTrailAtrFactor,
+        this.deps.config.profitTrailMinPips * managed.pip,
+        quote?.spread ?? 0,
+      )
       : normalDistance;
     managed.atr = atrValue;
     managed.trailDistance = distance;
@@ -1437,7 +1516,7 @@ export class RiskExecutor {
   }
 
   private async ensureEmergencyStop(managed: ManagedPosition): Promise<void> {
-    if (managed.closing || this.busy.has(managed.positionId)) return;
+    if (managed.closing || managed.closeRequested || this.busy.has(managed.positionId)) return;
     this.busy.add(managed.positionId);
     managed.lastStopEnsureAt = Date.now();
     try {
@@ -1477,6 +1556,20 @@ export class RiskExecutor {
     }
   }
 
+  /**
+   * Market-close the whole position. This is the ONLY path that actually
+   * closes a position after TS fires.
+   *
+   * Guarantees:
+   *   - Once `closeRequested` is set, it stays set until the broker confirms
+   *     the close (or the position disappears from the snapshot).
+   *   - If another broker mutation (SL update) is in flight, we retry every
+   *     `TS_CLOSE_BUSY_RETRY_MS` instead of waiting on the next manage tick.
+   *   - Failures are reconciled immediately; if the broker already closed the
+   *     position behind our back, we treat it as success.
+   *   - Successful close clears `closeRequested`, so the reconcile-close path
+   *     in `handleCloseFailure` and normal finalize can take over cleanly.
+   */
   private async closeFull(managed: ManagedPosition, reason: string): Promise<void> {
     if (managed.closing) return;
     managed.closeRequested ??= reason;
@@ -1585,6 +1678,7 @@ export class RiskExecutor {
       ok: false,
     });
   }
+
   private async finalize(managed: ManagedPosition): Promise<void> {
     // Snapshots can lag a close. Tombstone the id so the dynamic sync cannot
     // re-adopt the same position while the broker row is still visible.
@@ -1674,9 +1768,8 @@ export class RiskExecutor {
   private log(entry: TradeLogEntry): void {
     this.tradeLog.push(entry);
     if (this.tradeLog.length > 200) this.tradeLog.splice(0, this.tradeLog.length - 200);
-    const line = `${entry.action.padEnd(9)} ${entry.symbol ?? ""} ${entry.side ?? ""} ${
-      entry.volume ? `${entry.volume} lot ` : ""
-    }${entry.price ? `@ ${entry.price} ` : ""}${entry.sl ? `sl ${entry.sl} ` : ""}${entry.action === "open" && entry.positionId ? `#${entry.positionId} ` : ""}${entry.reason ?? ""}`.replace(/\s+/g, " ").trim();
+    const line = `${entry.action.padEnd(9)} ${entry.symbol ?? ""} ${entry.side ?? ""} ${entry.volume ? `${entry.volume} lot ` : ""
+      }${entry.price ? `@ ${entry.price} ` : ""}${entry.sl ? `sl ${entry.sl} ` : ""}${entry.action === "open" && entry.positionId ? `#${entry.positionId} ` : ""}${entry.reason ?? ""}`.replace(/\s+/g, " ").trim();
     this.deps.log(line);
     const tone: AgentTone =
       entry.ok === false || entry.action === "error"
