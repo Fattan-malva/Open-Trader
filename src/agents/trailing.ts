@@ -40,6 +40,29 @@ export function trailDistanceFromAtr(atr: number, atrFactor: number, minDistance
 }
 
 /**
+ * Desired post-lock distance: ATR/pip floor plus a spread cushion, capped at
+ * the current distance so this distance itself can never widen after locking.
+ */
+export function profitTrailDistanceFromAtr(
+  currentDistance: number,
+  atr: number,
+  atrFactor: number,
+  minDistance: number,
+  spread: number,
+  spreadFactor = 1.1,
+): number {
+  const atrDistance = trailDistanceFromAtr(atr, atrFactor, minDistance);
+  const spreadFloor = Number.isFinite(spread) && spread > 0 &&
+    Number.isFinite(spreadFactor) && spreadFactor > 0
+    ? spread * spreadFactor
+    : 0;
+  const desired = Math.max(atrDistance, spreadFloor);
+  return Number.isFinite(currentDistance) && currentDistance > 0
+    ? Math.min(currentDistance, desired)
+    : desired;
+}
+
+/**
  * Initial virtual stop is anchored to the actual fill and a fast-ATR distance.
  * It must not inherit the wider broker emergency SL.
  */
