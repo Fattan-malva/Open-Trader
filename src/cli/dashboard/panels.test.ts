@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { renderAgentContainers, type AgentStateFile } from "./panels.js";
+import { renderAgentContainers, renderDashboard, type AgentStateFile, type DashboardState } from "./panels.js";
 
 test("ENTRY panel keeps full reject reasons and wraps them to continuation rows", () => {
   const message =
@@ -115,4 +115,53 @@ test("all agent containers keep the tallest ENTRY height when later logs are sho
     [tallHeights[0], tallHeights[0], tallHeights[0]],
     "all cards should retain the high-water height after the log volume drops",
   );
+});
+
+
+test("a very long final ENTRY message never expands dashboard rows beyond terminal width", () => {
+  const now = Date.now();
+  const longMessage = "open ditolak XAUUSD: " + "BROKER_REJECT_REASON_".repeat(200);
+  const agent = {
+    running: true,
+    mode: "live",
+    updatedAt: now,
+    startedAt: now,
+    universe: 85,
+    timeframes: { screener: "M1", trend: "M5", confirm: "M1", trail: "M1" },
+    screener: { at: now, durationMs: 100, pass: 0, candidates: [] },
+    lastSignal: null,
+    openPositions: [],
+    stats: { trades: 0, wins: 0, losses: 0, flats: 0, netProfit: 0, consecutiveLosses: 0, winRate: 0 },
+    dailyPnl: 0,
+    activity: [{ at: now, agent: "entry", message: longMessage, tone: "warn" }],
+    executor: { managed: [], stats: {}, trailing: [], tradeLog: [] },
+  } as unknown as AgentStateFile;
+  const state = {
+    view: {
+      name: "test", accountId: "123", isDemo: true, status: "active",
+      executionMode: "market", leverage: 100, currency: "USD",
+      balance: 10, equity: 10, usedMargin: 0, freeMargin: 10,
+      marginLevel: 0, tradeMode: "full_access", orders: [], positions: [],
+      unrealized: 0,
+    },
+    ticks: { ticksPerSecond: 0, quotesCount: 0, subscribed: [], lastTickAt: 0 },
+    events: [],
+    equity: { stats: () => ({ start: 10, change: 0, changePct: 0 }) },
+    connection: { ticksState: "closed", eventsState: "closed", accessPoint: "https://example.com" },
+    startedAt: now,
+    paused: false,
+    showOrders: false,
+    showEvents: true,
+    showAgent: true,
+    showCharts: false,
+    halted: false,
+    agent,
+    history: [],
+  } as unknown as DashboardState;
+
+  const width = 90;
+  const output = renderDashboard(state, { width, height: 42 }).replace(/\\u001b\\[[0-9;]*m/g, "");
+  const overflow = output.split("\\n").map((line) => line.length).filter((length) => length > width);
+  assert.deepEqual(overflow, [], `rendered dashboard rows must stay within ${width} columns`);
+  assert.ok(output.includes("BROKER_REJECT_REASON"), "the long ENTRY reason must remain visible");
 });
