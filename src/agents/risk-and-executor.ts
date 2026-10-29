@@ -921,6 +921,7 @@ export class RiskExecutor {
     const epsilon = managed.pip / 100;
     if (!improved(managed.side, rounded, managed.trailStop, epsilon)) return;
 
+    const previousStop = managed.trailStop;
     managed.trailStop = rounded;
     this.trailing.push({
       at: Date.now(),
@@ -936,7 +937,7 @@ export class RiskExecutor {
       positionId: managed.positionId,
       side: managed.side,
       sl: rounded,
-      reason: `${why} → ${managed.trailStop.toFixed(managed.digits)} · ${(managed.trailDistance / managed.pip).toFixed(1)}p`,
+      reason: `TS Updated ${previousStop.toFixed(managed.digits)} → ${managed.trailStop.toFixed(managed.digits)} · dist ${(managed.trailDistance / managed.pip).toFixed(1)}p (${why})`,
       ok: true,
     });
   }
