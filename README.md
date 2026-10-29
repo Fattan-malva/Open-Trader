@@ -16,16 +16,17 @@ guaranteed.
 ## What it does
 
 ```
-M1 close ──► screener (M15 trend + M1 pullback/breakout + adaptive spread)
+every 2 s ──► fast screener (M5 trend + cached M1 pullback/breakout + adaptive spread)
           ──► entry (M1 confirmation + fresh executable quote)
           ──► risk (live account sizing + margin/risk limits + emergency SL)
           ──► trader (dynamic virtual trailing, no TP)
 ```
 
-- **Screener** scans every API-supported instrument (FX, metals, crypto,
-  energy) at each M1 close (+2 s). Stocks and indices are excluded because the
-  public API does not serve them.
-  ranks active symbols, then evaluates trend pullbacks and closed-candle momentum breakouts.
+- **Screener** ranks fresh quotes every 2 seconds. It screens up to 20 active
+  symbols per pass and requests M1/M5 candle history asynchronously into a cache;
+  the scan loop does not wait for rate-limited candle requests. Stocks and indices
+  are excluded because the public API does not serve them. Closed-candle
+  pullbacks and momentum breakouts are scored from cached history.
   Spread caps are instrument-aware and each symbol develops its own rolling spread baseline;
   sudden spread spikes are rejected after the baseline warms up.
 - **Entry** validates the selected setup, confirmation candle, RSI exhaustion, signal-distance,
@@ -115,17 +116,17 @@ account.
 | Setting | Default | Env |
 | --- | --- | --- |
 | Screener / confirmation / trail timeframe | `M1` | `AGENT_SCREENER_TF`, `AGENT_CONFIRM_TF`, `AGENT_TRAIL_TF` |
-| Trend timeframe | `M15` | `AGENT_TREND_TF` |
-| Scan alignment | M1 close + 2 s | `AGENT_SCAN_INTERVAL_MS` (fallback) |
+| Trend timeframe | `M5` | `AGENT_TREND_TF` |
+| Scan interval | 2 s; not candle-aligned by default | `AGENT_SCAN_INTERVAL_MS`, `AGENT_ALIGN_SCAN_TO_CANDLE` |
 | Manage cadence | 1 s | `AGENT_MANAGE_INTERVAL_MS` |
-| Shortlist / candidates | 20 / 16 | `AGENT_SHORTLIST`, `AGENT_MAX_CANDIDATES` |
-| Minimum score | 16 | `AGENT_MIN_SCORE` |
-| Pullback RSI band | 27–73 | `AGENT_RSI_MIN`, `AGENT_RSI_MAX` |
-| Pullback to M1 EMA50 | ≤ 2.2×ATR | `AGENT_PULLBACK_ATR` |
-| M15 trend separation | ≥ 0.006×ATR | `AGENT_MIN_TREND_ATR` |
+| Shortlist / candidates | 20 / 20 | `AGENT_SHORTLIST`, `AGENT_MAX_CANDIDATES` |
+| Minimum score | 10 | `AGENT_MIN_SCORE` |
+| Pullback RSI band | 20–80 | `AGENT_RSI_MIN`, `AGENT_RSI_MAX` |
+| Pullback to M1 EMA50 | ≤ 3.0×ATR | `AGENT_PULLBACK_ATR` |
+| M5 trend separation | ≥ 0.003×ATR | `AGENT_MIN_TREND_ATR` |
 | FX / non-FX hard spread cap | ≤ 5 pips / ≤ 0.08% | `AGENT_MAX_SPREAD_PIPS`, `AGENT_MAX_SPREAD_PCT` |
 | Per-symbol spread spike guard | ≤ 2.5× rolling median | `AGENT_MAX_SPREAD_SPIKE_RATIO` |
-| Breakout range / candle body | 10 bars / ≥ 0.15×ATR | `AGENT_BREAKOUT_LOOKBACK`, `AGENT_BREAKOUT_BODY_ATR` |
+| Breakout range / candle body | 5 bars / ≥ 0.08×ATR | `AGENT_BREAKOUT_LOOKBACK`, `AGENT_BREAKOUT_BODY_ATR` |
 | Breakout RSI exhaustion | BUY ≤ 82 / SELL ≥ 18 | `AGENT_BREAKOUT_RSI_CEILING`, `AGENT_BREAKOUT_RSI_FLOOR` |
 | Spread cost | ≤ 40% of trail | `AGENT_MAX_SPREAD_TRAIL` |
 | Initial virtual trail | max(1.2×M1 ATR, 4 pips) | `AGENT_TRAIL_ATR`, `AGENT_TRAIL_MIN_PIPS` |
@@ -136,8 +137,10 @@ account.
 | Max chase | 1.5×ATR | `AGENT_MAX_CHASE_ATR` |
 | Max quote age | 8 s | `AGENT_MAX_QUOTE_AGE_MS` |
 | Sizing equity | min(actual balance, equity), converted to USD | account snapshot + market quotes |
-| Risk per trade | 0.5% of actual account capital | `AGENT_RISK_PCT` |
+| Risk per trade | 0.1% of actual account capital | `AGENT_RISK_PCT` |
 | Max lots per trade | 0.5 | `AGENT_MAX_LOTS` |
+| Re-entry trigger | new valid closed candle or favourable move ≥ max(0.2×ATR, 1 pip) | `AGENT_REENTRY_STEP_ATR`, `AGENT_REENTRY_MIN_PIPS` |
+| Same-symbol entries | No fixed per-symbol or total-position count; aggregate risk/margin still cap exposure | executor |
 | Aggregate open-risk cap | 2% of account equity | `AGENT_MAX_OPEN_RISK_PCT` |
 | Daily-loss entry cutoff | 3% of day-start balance | `AGENT_MAX_DAILY_LOSS_PCT` |
 | Free-margin reserve | 25% plus 3× margin buffer | `AGENT_MARGIN_RESERVE_PCT`, `AGENT_MARGIN_BUFFER` |
