@@ -520,6 +520,16 @@ export class RiskExecutor {
     if (!spreadWithinLimit(signal.symbol, latestQuote, this.deps.config)) {
       return { ok: false, reason: "spread changed during sizing; retry next scan" };
     }
+    const latestSpreadTrailRatio = latestQuote.spread / signal.trailDistance;
+    if (
+      !Number.isFinite(latestSpreadTrailRatio) ||
+      latestSpreadTrailRatio > this.deps.config.maxSpreadTrailRatio
+    ) {
+      return {
+        ok: false,
+        reason: `spread cost ${(latestSpreadTrailRatio * 100).toFixed(0)}% of trail during sizing; retry next scan`,
+      };
+    }
     const latestExecution = signal.side === "buy" ? latestQuote.ask : latestQuote.bid;
     if (Math.abs(latestExecution - signal.entry) > this.deps.config.maxChaseAtr * signal.atr) {
       return { ok: false, reason: "entry moved too far during sizing; retry next scan" };
