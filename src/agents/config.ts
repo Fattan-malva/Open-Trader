@@ -58,8 +58,6 @@ export interface AgentConfig {
   maxLotsPerTrade: number;
   marginBuffer: number;
 
-  /** Minimum gross USD profit to lock after activation. */
-  trailProfitLockUsd: number;
   /** Rate-limit broker-side stop improvements. */
   brokerStopUpdateMs: number;
   brokerStopMoveMinPips: number;
@@ -140,7 +138,6 @@ export function loadAgentConfig(
     trailAtrFactor: num(env, "AGENT_TRAIL_ATR", 1.2),
     trailAtrPeriod: Math.max(2, Math.trunc(num(env, "AGENT_TRAIL_ATR_PERIOD", 14))),
     trailMinPips: num(env, "AGENT_TRAIL_MIN_PIPS", 4),
-    trailProfitLockUsd: Math.max(0, num(env, "AGENT_TRAIL_PROFIT_LOCK_USD", 0.10)),
     brokerStopUpdateMs: Math.max(1000, num(env, "AGENT_BROKER_STOP_UPDATE_MS", 10000)),
     brokerStopMoveMinPips: Math.max(0.1, num(env, "AGENT_BROKER_STOP_MOVE_MIN_PIPS", 2)),
     stopEnsureRetryMs: num(env, "AGENT_STOP_RETRY_MS", 15000),
