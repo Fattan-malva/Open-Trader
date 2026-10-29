@@ -242,9 +242,11 @@ npm test
 npm run typecheck
 ```
 
-Current regression tests cover entry-anchored BUY/SELL virtual stops, monotonic
-ratcheting, and executable-side stop-hit logic. Screener/entry gates and live
-broker/account behavior still need additional integration and demo testing.
+Regression tests cover entry-anchored BUY/SELL virtual stops, monotonic
+ratcheting, executable-side stop-hit logic, FX/non-FX adaptive spread guards,
+closed-candle breakout scoring, setup-aware entry validation, stale quotes and
+rolling 60-second tick activity. Live broker/account behavior still needs
+integration and demo testing.
 
 ## Troubleshooting
 
