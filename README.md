@@ -33,7 +33,8 @@ M1 close ──► screener (M15 trend + M1 pullback + spread)
   daily-loss limits. It opens a market order with a **broker emergency stop-loss**
   and never sends a take-profit.
 - **Trader** starts TS VIRT from the actual fill and fast-ATR distance rather
-  than copying the distant emergency SL. Profit-lock trailing activates at the
+  than copying the distant emergency SL. Profit-lock trailing activates once the
+  configured lock amount plus a small safety headroom can be secured.
   estimated gross USD threshold, ratchets only toward profit, and attempts to
   tighten the broker emergency SL subject to broker distance and API-rate limits.
 - The broker SL is the crash safety net; the dashboard shows both the broker SL
@@ -121,7 +122,7 @@ account.
 | Spread cost | ≤ 40% of trail | `AGENT_MAX_SPREAD_TRAIL` |
 | Virtual trail | max(1.2×M1 ATR, 4 pips) | `AGENT_TRAIL_ATR`, `AGENT_TRAIL_MIN_PIPS` |
 | Broker emergency SL | 1.5×M1 ATR, min 6 pips / 3× spread | `AGENT_EMERGENCY_SL_ATR`, `AGENT_MIN_STOP_PIPS` |
-| Profit-lock trigger / minimum lock | $0.30 estimated gross / $0.10 | `AGENT_TRAIL_PROFIT_ACTIVATION_USD`, `AGENT_TRAIL_PROFIT_LOCK_USD` |
+| Profit-lock minimum | $0.10 gross; activates at lock + max(50% of lock, $0.02) | `AGENT_TRAIL_PROFIT_LOCK_USD` |
 | Broker SL update cadence / minimum move | 10 s / 2 pips | `AGENT_BROKER_STOP_UPDATE_MS`, `AGENT_BROKER_STOP_MOVE_MIN_PIPS` |
 | Max chase | 2×ATR | `AGENT_MAX_CHASE_ATR` |
 | Max quote age | 8 s | `AGENT_MAX_QUOTE_AGE_MS` |
@@ -142,9 +143,10 @@ instruments whose M1 ATR is too quiet or too wild.
 - **SELL** tracks the lowest ask; the virtual stop ratchets only downward.
 - A new M1 ATR is read at each closed M1 candle. If ATR shrinks, the stop may
   tighten; if ATR grows, the stop does not loosen.
-- The virtual stop does not ratchet until estimated gross open profit reaches
-  `AGENT_TRAIL_PROFIT_ACTIVATION_USD`. It then locks at least the configured
-  gross amount where instrument price precision permits.
+- The virtual stop starts profit-locking as soon as estimated gross open profit
+  exceeds the configured lock amount by a small headroom: `max(50% of lock, $0.02)`.
+  It then follows the best price and locks at least the configured gross amount
+  where instrument price precision permits; the stop never moves backward.
 - A BUY closes when `bid ≤ TS VIRT`; a SELL closes when `ask ≥ TS VIRT`.
 - After profit-lock activation, the agent periodically tries to move the broker
   emergency SL in the protective direction. Broker minimum-distance rules may
