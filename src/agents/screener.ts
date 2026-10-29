@@ -168,6 +168,7 @@ export interface CandleScoreInput {
   trend: NormalizedCandle[];
   quote: Quote;
   options: ScreenerOptions;
+  onReject?: (reason: string) => void;
 }
 
 /**
@@ -180,7 +181,11 @@ export interface CandleScoreInput {
  */
 export function scoreCandidate(input: CandleScoreInput): Candidate | null {
   const { symbol, screener, trend, quote, options } = input;
-  if (screener.length < 60 || trend.length < 210) return null;
+  const reject = (reason: string): null => {
+    input.onReject?.(reason);
+    return null;
+  };
+  if (screener.length < 60 || trend.length < 210) return reject("insufficient-candles");
 
   const trendCloses = closes(trend);
   const trendEma50 = lastFinite(ema(trendCloses, 50));
@@ -191,10 +196,10 @@ export function scoreCandidate(input: CandleScoreInput): Candidate | null {
     trendEma200 === undefined ||
     trendAtrValue === undefined ||
     trendAtrValue <= 0
-  ) return null;
+  ) return reject("trend-indicators-not-ready");
 
   const trendSeparation = (trendEma50 - trendEma200) / trendAtrValue;
-  if (Math.abs(trendSeparation) < options.minTrendAtr) return null;
+  if (Math.abs(trendSeparation) < options.minTrendAtr) return reject("trend-too-weak");
   const direction: Direction = trendSeparation > 0 ? "buy" : "sell";
   const sign = direction === "buy" ? 1 : -1;
   const trendAtr = trendSeparation * sign;
@@ -212,12 +217,12 @@ export function scoreCandidate(input: CandleScoreInput): Candidate | null {
     screenerRsi === undefined ||
     close === undefined ||
     !last
-  ) return null;
+  ) return reject("screener-indicators-not-ready");
 
   const atrPct = atrPercent(screener, screenerAtr);
-  if (atrPct < options.minAtrPct || atrPct > options.maxAtrPct) return null;
+  if (atrPct < options.minAtrPct || atrPct > options.maxAtrPct) return reject("atr-out-of-range");
   const spread = assessSpread(symbol, quote, options);
-  if (!spread.ok) return null;
+  if (!spread.ok) return reject(spread.reason?.startsWith("spread spike") ? "spread-spike" : "spread-rejected");
 
   const trailDistance = trailDistanceFromAtr(
     screenerAtr,
@@ -227,7 +232,7 @@ export function scoreCandidate(input: CandleScoreInput): Candidate | null {
   const spreadRatio = trailDistance > 0
     ? quote.spread / trailDistance
     : Number.POSITIVE_INFINITY;
-  if (!Number.isFinite(spreadRatio) || spreadRatio > options.maxSpreadTrailRatio) return null;
+  if (!Number.isFinite(spreadRatio) || spreadRatio > options.maxSpreadTrailRatio) return reject("spread-vs-trail");
 
   const distanceAtr = (close - screenerEma50) / screenerAtr;
   const pullbackOk =
@@ -250,7 +255,7 @@ export function scoreCandidate(input: CandleScoreInput): Candidate | null {
       ? last.close > last.open && last.close > priorHigh
       : last.close < last.open && last.close < priorLow);
 
-  if (!pullbackOk && !breakoutOk) return null;
+  if (!pullbackOk && !breakoutOk) return reject("no-valid-setup");
 
   const trendScore = clamp(trendAtr / 1.2, 0, 1) * 30;
   const spreadScore = spreadQuality(symbol, quote, options) * 20;
@@ -290,7 +295,7 @@ export function scoreCandidate(input: CandleScoreInput): Candidate | null {
   }
   possible.sort((a, b) => b.score - a.score);
   const best = possible[0];
-  if (!best || best.score < options.minScore) return null;
+  if (!best || best.score < options.minScore) return reject("score-below-minimum");
 
   const reasons = [
     `${options.trendTimeframe} ${direction === "buy" ? "uptrend" : "downtrend"} ${trendAtr.toFixed(2)}×ATR`,
@@ -332,34 +337,50 @@ export interface ScanDiagnostics {
   fresh: number;
   prefiltered: number;
   shortlist: number;
+  /** Symbols skipped while background candle history is warming or refreshing. */
+  cachePending: number;
+  /** Cumulative candle API/cache failures since this screener started. */
+  cacheFailures: number;
   candleFails: number;
   scored: number;
   passed: number;
   spreadRejected: number;
   spreadSpikeRejected: number;
+  scoreRejects: Record<string, number>;
   /** Highest prefilter scores, useful to see why a pair reached the shortlist. */
   top: Array<{ symbol: string; prelim: number; spreadPips: number; mom5: number | null }>;
+}
+
+interface CandleCacheEntry {
+  candles: NormalizedCandle[];
+  /** Timeframe boundary represented by the latest completed refresh. */
+  boundary: number;
+  /** Avoid scheduling repeated requests inside one timeframe boundary. */
+  requestedBoundary: number;
+  loading: boolean;
 }
 
 export class Screener {
   readonly momentum = new MomentumTracker();
   lastScanAt = 0;
   lastScanDurationMs = 0;
-  private readonly trendCache = new Map<
-    string,
-    { boundary: number; candles: NormalizedCandle[] }
-  >();
+  private readonly trendCache = new Map<string, CandleCacheEntry>();
+  private readonly screenerCache = new Map<string, CandleCacheEntry>();
+  private cacheFailures = 0;
   lastDiagnostics: ScanDiagnostics = {
     universe: 0,
     withQuote: 0,
     fresh: 0,
     prefiltered: 0,
     shortlist: 0,
+    cachePending: 0,
+    cacheFailures: 0,
     candleFails: 0,
     scored: 0,
     passed: 0,
     spreadRejected: 0,
     spreadSpikeRejected: 0,
+    scoreRejects: {},
     top: [],
   };
 
@@ -374,25 +395,63 @@ export class Screener {
     observeSpread(quote);
   }
 
-  private async trendCandles(
+  /**
+   * Return the latest cached closed candles immediately and refresh stale data
+   * in the background. Candle API calls are rate-limited, so waiting for every
+   * symbol serially would make the scanner slower than the market.
+   */
+  private cachedCandles(
+    cache: Map<string, CandleCacheEntry>,
     symbol: string,
+    timeframe: Timeframe,
+    count: number,
+    minimumCandles: number,
     now: number,
-  ): Promise<NormalizedCandle[] | null> {
-    const duration = timeframeMs(this.options.trendTimeframe);
-    const boundary = Math.floor(now / duration) * duration;
-    const cached = this.trendCache.get(symbol);
-    if (cached && cached.boundary === boundary) return cached.candles;
+  ): NormalizedCandle[] | null {
+    const duration = timeframeMs(timeframe);
+    const requestedBoundary = Math.floor(now / duration) * duration;
+    let entry = cache.get(symbol);
+    if (!entry) {
+      entry = {
+        candles: [],
+        boundary: -1,
+        requestedBoundary: -1,
+        loading: false,
+      };
+      cache.set(symbol, entry);
+    }
 
-    const result = await this.tools.get_candles({
-      symbol,
-      timeframe: this.options.trendTimeframe,
-      n: 260,
-    });
-    if (!result.ok) return null;
-    const candles = dropFormingCandle(result.data, duration, now);
-    if (candles.length < 210) return null;
-    this.trendCache.set(symbol, { boundary, candles });
-    return candles;
+    if (
+      !entry.loading &&
+      entry.requestedBoundary < requestedBoundary &&
+      (entry.candles.length < minimumCandles || entry.boundary < requestedBoundary)
+    ) {
+      entry.loading = true;
+      entry.requestedBoundary = requestedBoundary;
+      void this.tools.get_candles({ symbol, timeframe, n: count })
+        .then((result) => {
+          const completedAt = Date.now();
+          if (!result.ok) {
+            this.cacheFailures += 1;
+            return;
+          }
+          const candles = dropFormingCandle(result.data, duration, completedAt);
+          if (candles.length < minimumCandles) {
+            this.cacheFailures += 1;
+            return;
+          }
+          entry!.candles = candles;
+          entry!.boundary = Math.floor(completedAt / duration) * duration;
+        })
+        .catch(() => {
+          this.cacheFailures += 1;
+        })
+        .finally(() => {
+          entry!.loading = false;
+        });
+    }
+
+    return entry.candles.length >= minimumCandles ? entry.candles : null;
   }
 
   async scan(universe: string[]): Promise<Candidate[]> {
@@ -423,8 +482,8 @@ export class Screener {
       const mom5 = this.momentum.changePct(symbol, 5);
       const activity = clamp(this.momentum.ticksLastMinute(symbol, now) / 120, 0, 1);
       const move = mom5 === null ? 0.35 : clamp(Math.abs(mom5) / 0.08, 0, 1);
-      // Rank active and moving symbols without allowing spread quality to
-      // dominate the shortlist before technical setup scoring.
+      // Ranking is cheap and local. Only the highest-activity symbols warm
+      // their candle caches, avoiding a burst of REST requests for the universe.
       const prelim =
         spreadQuality(symbol, quote, this.options) * 35 + activity * 25 + move * 40;
       pre.push({ quote, mom5, prelim });
@@ -435,31 +494,34 @@ export class Screener {
 
     const candidates: Candidate[] = [];
     let candleFails = 0;
+    let cachePending = 0;
     let scored = 0;
+    const scoreRejects: Record<string, number> = {};
+    const rejectScore = (reason: string): void => {
+      scoreRejects[reason] = (scoreRejects[reason] ?? 0) + 1;
+    };
+
     for (const entry of shortlist) {
       const symbol = entry.quote.symbol;
-      const trend = await this.trendCandles(symbol, now);
-      if (!trend) {
-        candleFails += 1;
-        continue;
-      }
-      const screenerResult = await this.tools.get_candles({
+      const trend = this.cachedCandles(
+        this.trendCache,
         symbol,
-        timeframe: this.options.screenerTimeframe,
-        n: 180,
-      });
-      if (!screenerResult.ok) {
-        candleFails += 1;
-        continue;
-      }
-
-      const screener = dropFormingCandle(
-        screenerResult.data,
-        timeframeMs(this.options.screenerTimeframe),
+        this.options.trendTimeframe,
+        260,
+        210,
         now,
       );
-      if (screener.length < 60) {
-        candleFails += 1;
+      const screener = this.cachedCandles(
+        this.screenerCache,
+        symbol,
+        this.options.screenerTimeframe,
+        180,
+        60,
+        now,
+      );
+
+      if (!trend || !screener) {
+        cachePending += 1;
         continue;
       }
 
@@ -470,6 +532,7 @@ export class Screener {
         trend,
         quote: entry.quote,
         options: this.options,
+        onReject: rejectScore,
       });
       if (candidate) candidates.push(candidate);
     }
@@ -483,11 +546,14 @@ export class Screener {
       fresh,
       prefiltered: pre.length,
       shortlist: shortlist.length,
+      cachePending,
+      cacheFailures: this.cacheFailures,
       candleFails,
       scored,
       passed: capped.length,
       spreadRejected,
       spreadSpikeRejected,
+      scoreRejects,
       top: shortlist.slice(0, 6).map((entry) => ({
         symbol: entry.quote.symbol,
         prelim: Number(entry.prelim.toFixed(1)),
