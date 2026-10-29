@@ -393,7 +393,13 @@ export class AgentEngine {
         view = await this.deps.snapshot.get();
         const opened = await this.deps.executor.open(decision.signal, view);
         if (opened.ok && opened.managed) {
-          this.lastSignal = { ...decision.signal, lot: opened.managed.volume };
+          this.lastSignal = {
+            ...decision.signal,
+            entry: opened.managed.entry,
+            emergencySl: opened.managed.emergencySl,
+            slPips: Math.abs(opened.managed.entry - opened.managed.emergencySl) / opened.managed.pip,
+            lot: opened.managed.volume,
+          };
           entered.push(`${opened.managed.symbol} ${opened.managed.volume} lot`);
           this.record(
             "entry",
