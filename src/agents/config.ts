@@ -24,6 +24,10 @@ export interface AgentConfig {
   /** FX spread limit in pips. Other instruments use spread percent. */
   maxSpreadPips: number;
   maxSpreadPct: number;
+  /** Category-specific non-FX spread caps, expressed as percent. */
+  maxMetalSpreadPct?: number;
+  maxCryptoSpreadPct?: number;
+  maxEnergySpreadPct?: number;
   /** Reject when the current spread is this many times above its rolling median. */
   maxSpreadSpikeRatio: number;
   /** Reject when spread costs more than this fraction of the virtual trail distance. */
