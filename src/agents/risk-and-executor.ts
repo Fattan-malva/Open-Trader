@@ -25,7 +25,6 @@ import {
   profitTrailDistanceFromAtr,
   trailDistanceFromAtr,
   updateBest,
-  virtualStopLocksProfit,
   virtualStopHit,
   type PositionSide,
 } from "./trailing.js";
@@ -829,7 +828,7 @@ export class RiskExecutor {
     const previousBest = managed.best;
     managed.best = updateBest(managed.side, managed.best, quote.bid, quote.ask);
     if (managed.best !== previousBest) {
-      this.advanceStop(managed, "best update");
+      this.advanceStop(managed, "best update", quote);
     }
 
     const minimumProfitDistance = Math.max(
@@ -908,7 +907,7 @@ export class RiskExecutor {
     });
     // The distance change can move the stop closer to the best price. The
     // advanceVirtualStop ratchet guarantees the level itself never backs off.
-    this.advanceStop(managed, "profit trail tighten");
+    this.advanceStop(managed, "profit trail tighten", quote);
   }
 
   async manage(view: AccountView): Promise<void> {
@@ -1054,7 +1053,7 @@ export class RiskExecutor {
     return `TS VIRTUAL hit | bid/ask ${price} | trail ${(managed.trailDistance / managed.pip).toFixed(1)}p`;
   }
 
-  private advanceStop(managed: ManagedPosition, why: string): void {
+  private advanceStop(managed: ManagedPosition, why: string, quote?: Quote): void {
     if (managed.closing) return;
     let next = advanceVirtualStop(
       managed.side,
@@ -1071,7 +1070,7 @@ export class RiskExecutor {
       factor;
     const epsilon = managed.pip / 100;
     if (!improved(managed.side, rounded, managed.trailStop, epsilon)) return;
-    const currentQuote = this.deps.ticks.get(managed.symbol);
+    const currentQuote = quote ?? this.deps.ticks.get(managed.symbol);
     const spreadBuffer = currentQuote &&
       isFreshQuote(currentQuote.timestamp, Date.now(), this.deps.config.maxQuoteAgeMs) &&
       Number.isFinite(currentQuote.spread) &&
