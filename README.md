@@ -16,8 +16,8 @@ guaranteed.
 ## What it does
 
 ```
-M1 close ──► screener (M15 trend + M1 pullback + spread)
-          ──► entry (M1 confirmation)
+M1 close ──► screener (M15 trend + M1 pullback/breakout + adaptive spread)
+          ──► entry (M1 confirmation + fresh executable quote)
           ──► risk (live account sizing + margin/risk limits + emergency SL)
           ──► trader (dynamic virtual trailing, no TP)
 ```
@@ -25,8 +25,12 @@ M1 close ──► screener (M15 trend + M1 pullback + spread)
 - **Screener** scans every API-supported instrument (FX, metals, crypto,
   energy) at each M1 close (+2 s). Stocks and indices are excluded because the
   public API does not serve them.
-  ranks fresh, liquid quotes, then rejects weak trend/pullback/spread setups.
-- **Entry** requires the last closed M1 candle to agree with the M15 trend.
+  ranks active symbols, then evaluates trend pullbacks and closed-candle momentum breakouts.
+  Spread caps are instrument-aware and each symbol develops its own rolling spread baseline;
+  sudden spread spikes are rejected after the baseline warms up.
+- **Entry** validates the selected setup, confirmation candle, RSI exhaustion, signal-distance,
+  spread cost versus TS VIRT distance, and the latest executable quote. The executor rechecks
+  spread and executable price immediately before order submission.
 - **Risk** sizes from current account balance/equity (converted to USD for
   sizing), validates actual account leverage, caps volume by available free
   margin while reserving a buffer, and enforces position, aggregate-risk, and
@@ -112,17 +116,20 @@ account.
 | Trend timeframe | `M15` | `AGENT_TREND_TF` |
 | Scan alignment | M1 close + 2 s | `AGENT_SCAN_INTERVAL_MS` (fallback) |
 | Manage cadence | 1 s | `AGENT_MANAGE_INTERVAL_MS` |
-| Shortlist / candidates | 16 / 16 | `AGENT_SHORTLIST`, `AGENT_MAX_CANDIDATES` |
+| Shortlist / candidates | 20 / 16 | `AGENT_SHORTLIST`, `AGENT_MAX_CANDIDATES` |
 | Minimum score | 16 | `AGENT_MIN_SCORE` |
-| RSI band | 30–70 | `AGENT_RSI_MIN`, `AGENT_RSI_MAX` |
-| Pullback to M1 EMA50 | ≤ 1.8×ATR | `AGENT_PULLBACK_ATR` |
-| M15 trend separation | ≥ 0.008×ATR | `AGENT_MIN_TREND_ATR` |
-| FX / non-FX spread | ≤ 5 pips / ≤ 0.08% | `AGENT_MAX_SPREAD_PIPS`, `AGENT_MAX_SPREAD_PCT` |
+| Pullback RSI band | 27–73 | `AGENT_RSI_MIN`, `AGENT_RSI_MAX` |
+| Pullback to M1 EMA50 | ≤ 2.2×ATR | `AGENT_PULLBACK_ATR` |
+| M15 trend separation | ≥ 0.006×ATR | `AGENT_MIN_TREND_ATR` |
+| FX / non-FX hard spread cap | ≤ 5 pips / ≤ 0.08% | `AGENT_MAX_SPREAD_PIPS`, `AGENT_MAX_SPREAD_PCT` |
+| Per-symbol spread spike guard | ≤ 2.5× rolling median | `AGENT_MAX_SPREAD_SPIKE_RATIO` |
+| Breakout range / candle body | 10 bars / ≥ 0.15×ATR | `AGENT_BREAKOUT_LOOKBACK`, `AGENT_BREAKOUT_BODY_ATR` |
+| Breakout RSI exhaustion | BUY ≤ 82 / SELL ≥ 18 | `AGENT_BREAKOUT_RSI_CEILING`, `AGENT_BREAKOUT_RSI_FLOOR` |
 | Spread cost | ≤ 40% of trail | `AGENT_MAX_SPREAD_TRAIL` |
 | Virtual trail | max(1.2×M1 ATR, 4 pips) | `AGENT_TRAIL_ATR`, `AGENT_TRAIL_MIN_PIPS` |
 | Broker emergency SL | 1.5×M1 ATR, min 6 pips / 3× spread | `AGENT_EMERGENCY_SL_ATR`, `AGENT_MIN_STOP_PIPS` |
 | Broker SL update cadence / minimum move | 10 s / 2 pips | `AGENT_BROKER_STOP_UPDATE_MS`, `AGENT_BROKER_STOP_MOVE_MIN_PIPS` |
-| Max chase | 2×ATR | `AGENT_MAX_CHASE_ATR` |
+| Max chase | 1.5×ATR | `AGENT_MAX_CHASE_ATR` |
 | Max quote age | 8 s | `AGENT_MAX_QUOTE_AGE_MS` |
 | Sizing equity | min(actual balance, equity), converted to USD | account snapshot + market quotes |
 | Risk per trade | 0.5% of actual account capital | `AGENT_RISK_PCT` |
@@ -217,9 +224,9 @@ src/
 ├─ monitor/equity.ts      daily equity samples + start balance
 ├─ agents/
 │  ├─ config.ts           thresholds and sizing
-│  ├─ screener.ts         M15 trend + M1 pullback + spread prefilter/ranking
-│  ├─ entry.ts            M1 confirmation gate, fast-ATR emergency stop, M1 trail
-│  ├─ spread.ts           FX pip limit / non-FX percentage limit
+│  ├─ screener.ts         M15 trend + M1 pullback/breakout ranking
+│  ├─ entry.ts            Setup-aware confirmation, spread cost, fast-ATR emergency stop
+│  ├─ spread.ts           Hard caps + per-symbol rolling spread-spike detection
 │  ├─ risk-and-executor.ts sizing, gating, virtual trailing, adoption, kill close
 │  ├─ engine.ts           M1 scan loop, manage loop, watchdog, state writer
 │  ├─ runtime.ts          wires the live agent to the dashboard context
