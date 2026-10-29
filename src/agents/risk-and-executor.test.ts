@@ -24,8 +24,8 @@ test("remaining aggregate budget caps the lot size below the per-trade risk targ
 test("rejects a minimum lot when it cannot fit the remaining aggregate budget", () => {
   const sized = computeLots({ ...common, riskBudgetUsd: 0.05 });
   assert.equal(sized.lots, 0);
-  assert.match(sized.reason ?? "", /remaining open-risk budget/);
-  assert.match(sized.reason ?? "", /no safe minimum lot fits/);
+  assert.match(sized.reason ?? "", /remaining aggregate budget/);
+  assert.match(sized.reason ?? "", /minimum lot does not fit safely/);
 });
 
 test("retains normal per-trade sizing when no aggregate budget is supplied", () => {
@@ -53,4 +53,53 @@ test("detect broker responses indicating a position already closed", () => {
   assert.equal(indicatesPositionAlreadyClosed("Position is already closed"), true);
   assert.equal(indicatesPositionAlreadyClosed("off quotes"), false);
   assert.equal(indicatesPositionAlreadyClosed("market closed"), false);
+});
+
+test("small balance uses broker minimum lot when its real SL risk fits the remaining aggregate cap", () => {
+  const sized = computeLots({
+    ...common,
+    equity: 10,
+    riskPct: 0.1,
+    // Example broker minimum lot risk: $0.10; 2% of $10 leaves $0.20.
+    slPips: 10,
+    pipValuePerLot: 1,
+    volumeMin: 0.01,
+    volumeStep: 0.01,
+    riskBudgetUsd: 0.2,
+  });
+  assert.equal(sized.lots, 0.01);
+  assert.ok(sized.riskUsd <= 0.2);
+});
+
+test("small balance still rejects minimum lot when actual stop risk exceeds the aggregate cap", () => {
+  const sized = computeLots({
+    ...common,
+    equity: 10,
+    riskPct: 0.1,
+    slPips: 30,
+    pipValuePerLot: 1,
+    volumeMin: 0.01,
+    volumeStep: 0.01,
+    riskBudgetUsd: 0.2,
+  });
+  assert.equal(sized.lots, 0);
+  assert.match(sized.reason ?? "", /broker minimum 0.01 lot risks 0.30 USD/);
+  assert.match(sized.reason ?? "", /remaining aggregate budget 0.20 USD/);
+});
+
+test("minimum-lot fallback still obeys max lots per trade and broker volume maximum", () => {
+  const sized = computeLots({
+    ...common,
+    equity: 10,
+    riskPct: 0.1,
+    slPips: 10,
+    pipValuePerLot: 1,
+    volumeMin: 0.02,
+    volumeStep: 0.01,
+    maxLots: 0.01,
+    volumeMax: 1,
+    riskBudgetUsd: 0.5,
+  });
+  assert.equal(sized.lots, 0);
+  assert.match(sized.reason ?? "", /minimum lot does not fit safely/);
 });
