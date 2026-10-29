@@ -18,8 +18,8 @@ guaranteed.
 ```
 M1 close ──► screener (M15 trend + M1 pullback + spread)
           ──► entry (M1 confirmation)
-          ──► risk (1% sizing, broker emergency SL)
-          ──► trader (virtual trailing stop, no TP)
+          ──► risk (live account sizing + margin/risk limits + emergency SL)
+          ──► trader (profit-triggered virtual trailing, no TP)
 ```
 
 - **Screener** scans every API-supported instrument (FX, metals, crypto,
@@ -27,12 +27,15 @@ M1 close ──► screener (M15 trend + M1 pullback + spread)
   public API does not serve them.
   ranks fresh, liquid quotes, then rejects weak trend/pullback/spread setups.
 - **Entry** requires the last closed M1 candle to agree with the M15 trend.
-- **Risk** sizes 1% of virtual equity from the broker-stop distance and opens a
-  market order with a **broker emergency stop-loss**. It never sends a
-  take-profit.
-- **Trader** manages a program-side **virtual trailing stop** on every tick.
-  It starts at the trail distance and only ratchets in the trade direction.
-  A position closes when the market trades through the virtual stop.
+- **Risk** sizes from current account balance/equity (converted to USD for
+  sizing), validates actual account leverage, caps volume by available free
+  margin while reserving a buffer, and enforces position, aggregate-risk, and
+  daily-loss limits. It opens a market order with a **broker emergency stop-loss**
+  and never sends a take-profit.
+- **Trader** starts TS VIRT from the actual fill and fast-ATR distance rather
+  than copying the distant emergency SL. Profit-lock trailing activates at the
+  estimated gross USD threshold, ratchets only toward profit, and attempts to
+  tighten the broker emergency SL subject to broker distance and API-rate limits.
 - The broker SL is the crash safety net; the dashboard shows both the broker SL
   and the live `TS VIRT` level on every position row.
 
@@ -109,22 +112,26 @@ account.
 | Trend timeframe | `M15` | `AGENT_TREND_TF` |
 | Scan alignment | M1 close + 2 s | `AGENT_SCAN_INTERVAL_MS` (fallback) |
 | Manage cadence | 1 s | `AGENT_MANAGE_INTERVAL_MS` |
-| Shortlist / candidates | 60 / 60 | `AGENT_SHORTLIST`, `AGENT_MAX_CANDIDATES` |
+| Shortlist / candidates | 16 / 16 | `AGENT_SHORTLIST`, `AGENT_MAX_CANDIDATES` |
 | Minimum score | 18 | `AGENT_MIN_SCORE` |
 | RSI band | 25–75 | `AGENT_RSI_MIN`, `AGENT_RSI_MAX` |
 | Pullback to M1 EMA50 | ≤ 2×ATR | `AGENT_PULLBACK_ATR` |
 | M15 trend separation | ≥ 0.01×ATR | `AGENT_MIN_TREND_ATR` |
 | FX / non-FX spread | ≤ 6 pips / ≤ 0.10% | `AGENT_MAX_SPREAD_PIPS`, `AGENT_MAX_SPREAD_PCT` |
 | Spread cost | ≤ 45% of trail | `AGENT_MAX_SPREAD_TRAIL` |
-| Virtual trail | max(2×M1 ATR, 8 pips) | `AGENT_TRAIL_ATR`, `AGENT_TRAIL_MIN_PIPS` |
-| Broker emergency SL | 3×M15 ATR, min 10 pips / 3× spread | `AGENT_EMERGENCY_SL_ATR`, `AGENT_MIN_STOP_PIPS` |
+| Virtual trail | max(1.2×M1 ATR, 4 pips) | `AGENT_TRAIL_ATR`, `AGENT_TRAIL_MIN_PIPS` |
+| Broker emergency SL | 1.5×M1 ATR, min 6 pips / 3× spread | `AGENT_EMERGENCY_SL_ATR`, `AGENT_MIN_STOP_PIPS` |
+| Profit-lock trigger / minimum lock | $0.30 estimated gross / $0.10 | `AGENT_TRAIL_PROFIT_ACTIVATION_USD`, `AGENT_TRAIL_PROFIT_LOCK_USD` |
+| Broker SL update cadence / minimum move | 10 s / 2 pips | `AGENT_BROKER_STOP_UPDATE_MS`, `AGENT_BROKER_STOP_MOVE_MIN_PIPS` |
 | Max chase | 3×ATR | `AGENT_MAX_CHASE_ATR` |
 | Max quote age | 15 s | `AGENT_MAX_QUOTE_AGE_MS` |
-| Virtual equity for sizing | 10,000 USD | `EXNESS_VIRTUAL_EQUITY` |
-| Risk per trade | 1% | `AGENT_RISK_PCT` |
+| Sizing equity | min(actual balance, equity), converted to USD | account snapshot + market quotes |
+| Risk per trade | 0.5% of actual account capital | `AGENT_RISK_PCT` |
 | Max lots per trade | 0.5 | `AGENT_MAX_LOTS` |
-| Position / daily loss cap | none (unlimited entries) | — |
-| Margin buffer | ×3 | — |
+| Simultaneous positions | 3 | `AGENT_MAX_OPEN_POSITIONS` |
+| Aggregate open-risk cap | 2% of account equity | `AGENT_MAX_OPEN_RISK_PCT` |
+| Daily-loss entry cutoff | 3% of day-start balance | `AGENT_MAX_DAILY_LOSS_PCT` |
+| Free-margin reserve | 25% plus 3× margin buffer | `AGENT_MARGIN_RESERVE_PCT`, `AGENT_MARGIN_BUFFER` |
 
 `minAtrPct` / `maxAtrPct` (`AGENT_MIN_ATR_PCT`, `AGENT_MAX_ATR_PCT`) reject
 instruments whose M1 ATR is too quiet or too wild.
@@ -135,12 +142,22 @@ instruments whose M1 ATR is too quiet or too wild.
 - **SELL** tracks the lowest ask; the virtual stop ratchets only downward.
 - A new M1 ATR is read at each closed M1 candle. If ATR shrinks, the stop may
   tighten; if ATR grows, the stop does not loosen.
+- The virtual stop does not ratchet until estimated gross open profit reaches
+  `AGENT_TRAIL_PROFIT_ACTIVATION_USD`. It then locks at least the configured
+  gross amount where instrument price precision permits.
 - A BUY closes when `bid ≤ TS VIRT`; a SELL closes when `ask ≥ TS VIRT`.
-- The broker emergency SL is **not** moved during normal trailing.
+- After profit-lock activation, the agent periodically tries to move the broker
+  emergency SL in the protective direction. Broker minimum-distance rules may
+  reject stops that are too close; failures are written to the log.
+- Profit estimates use contract size and quote-currency conversion. Commission
+  and slippage may reduce realized net profit, so a $0.30 gross estimate does
+  not guarantee $0.30 net profit.
 
-Example: a BUY entry at `1.0850` with an 8-pip trail has `TS VIRT` at `1.0842`
-when management starts. At `1.0900` it becomes `1.0892`; at `1.0930` it becomes
-`1.0922`. If price falls back to `1.0920`, the stop stays at `1.0922`.
+Example: a BUY entry at `1.0850` with an 8-pip virtual distance starts at
+`1.0842`. After the profit trigger activates, a best bid of `1.0900` moves the
+ATR trail toward `1.0892` (or tighter if the profit-lock floor requires it).
+If price later falls through TS VIRT, the position is closed; the stop never
+moves back down.
 
 ## Agent state and audit
 
