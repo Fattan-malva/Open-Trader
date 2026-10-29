@@ -825,8 +825,12 @@ function conciseAgentMessage(entry: AgentActivity): string {
     if (lock) return `TS ${symbol ?? "?"} +${Number(lock[1]).toFixed(2)}`;
     const opened = message.match(/open ([A-Z0-9._-]+) ([0-9.]+) lot.*?@ ([0-9.]+)/i);
     if (opened) return `OPEN ${opened[1]} ${opened[2]} @ ${opened[3]}`;
+    const updated = message.match(/TS Updated\s+([0-9.]+)\s*→\s*([0-9.]+)/i);
     const trail = message.match(/→\s*([0-9.]+)/);
-    const pips = message.match(/trail ([0-9.]+)p/i);
+    const pips = message.match(/(?:dist|trail)\s+([0-9.]+)p/i);
+    if (/TS Updated/i.test(message) && updated) {
+      return `TS Updated ${symbol ?? "?"} ${updated[1]} → ${updated[2]}`;
+    }
     if (/trail|TS VIRTUAL hit/i.test(message)) {
       return trail
         ? `TS ${symbol ?? "?"} → ${trail[1]}`
