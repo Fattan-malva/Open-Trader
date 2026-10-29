@@ -1251,6 +1251,18 @@ export class RiskExecutor {
         reason,
         ok: true,
       });
+    } catch (error) {
+      managed.closing = false;
+      managed.closeRequested ??= reason;
+      managed.lastError = error instanceof Error ? error.message : String(error);
+      this.log({
+        at: Date.now(),
+        action: "error",
+        symbol: managed.symbol,
+        positionId: managed.positionId,
+        reason: `close error: ${managed.lastError} · retry pending`,
+        ok: false,
+      });
     } finally {
       this.busy.delete(managed.positionId);
     }
