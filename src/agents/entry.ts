@@ -133,14 +133,11 @@ export function decideEntry(input: {
 
   const entry = roundPrice(side === "buy" ? quote.ask : quote.bid, digits);
 
-  // The broker stop is intentionally far away: it is the "program died" layer.
-  // Trend-timeframe ATR keeps it wider than the fast virtual trail.
-  const stopAtr =
-    Number.isFinite(candidate.trendAtrValue) && candidate.trendAtrValue > 0
-      ? candidate.trendAtrValue
-      : atrValue;
+  // Keep the broker emergency stop closer to entry by using the fast
+  // screener ATR, not the much larger trend-timeframe ATR. Broker minimum
+  // distance and spread remain hard floors, and sizing uses this actual stop.
   const emergencyDistance = Math.max(
-    config.emergencySlAtrFactor * stopAtr,
+    config.emergencySlAtrFactor * atrValue,
     config.minStopPips * pip,
     quote.spread * 3,
   );
