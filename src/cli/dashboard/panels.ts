@@ -14,6 +14,7 @@ import { lineChart, type ChartPoint } from "../chart.js";
 import {
   clockTime,
   formatTime,
+  pad,
   style,
   table,
   visibleLength,
@@ -280,9 +281,9 @@ export function renderPositionsTable(
 ): string {
   if (view.positions.length === 0) return style.dim("  belum ada posisi terbuka");
 
-  const wide = width === undefined || width >= 108;
-  const mid = width === undefined || width >= 84;
-  const slim = width === undefined || width >= 52;
+  const wide = width === undefined || width >= 58;
+  const mid = width === undefined || width >= 58;
+  const slim = width === undefined || width >= 46;
   const managedById = new Map(
     (managedPositions ?? [])
       .filter((position) => position.positionId)
@@ -307,7 +308,7 @@ export function renderPositionsTable(
   const start = Math.max(0, scrollOffset);
   const visible = enriched.slice(start, start + limit);
 
-  const rows = visible.map(({ pos, digits, now, pips, sl, virtualTrail, pnlUsd }) => {
+  const rows = visible.map(({ pos, digits, now, sl, virtualTrail, pnlUsd }) => {
     const pnlCell =
       pnlUsd >= 0 ? style.green(`$${pnlUsd.toFixed(2)}`) : style.red(`$${pnlUsd.toFixed(2)}`);
     const slCell = sl !== null ? formatNumber(sl, digits) : style.dim("—");
@@ -323,11 +324,10 @@ export function renderPositionsTable(
         style.bold(pos.instrument),
         sideLabel(pos.direction),
         Number(pos.volume).toFixed(2),
-        Number(pos.open_price).toFixed(digits),
         now !== undefined ? formatNumber(now, digits) : style.dim("—"),
-        pnlCell,
-        slCell,
         tsCell,
+        slCell,
+        pnlCell,
       ];
     }
     if (mid) {
@@ -336,35 +336,29 @@ export function renderPositionsTable(
         sideLabel(pos.direction),
         Number(pos.volume).toFixed(2),
         now !== undefined ? formatNumber(now, digits) : style.dim("—"),
-        pnlCell,
-        slCell,
         tsCell,
+        pnlCell,
       ];
     }
     if (slim) {
       return [
         style.bold(pos.instrument),
         sideLabel(pos.direction),
-        Number(pos.volume).toFixed(2),
-        pnlCell,
+        now !== undefined ? formatNumber(now, digits) : style.dim("—"),
         tsCell,
+        pnlCell,
       ];
     }
-    return [
-      style.bold(pos.instrument),
-      sideLabel(pos.direction),
-      pnlCell,
-      tsCell,
-    ];
+    return [style.bold(pos.instrument), sideLabel(pos.direction), tsCell, pnlCell];
   });
 
   const headers = wide
-    ? ["SYMBOL", "SIDE", "LOT", "ENTRY", "NOW", "PNL $", "SL", "TS VIRT"]
+    ? ["SYMBOL", "SIDE", "LOT", "NOW", "TS VIRT", "SL", "PNL $"]
     : mid
-      ? ["SYMBOL", "SIDE", "LOT", "NOW", "PNL $", "SL", "TS VIRT"]
+      ? ["SYMBOL", "SIDE", "LOT", "NOW", "TS VIRT", "PNL $"]
       : slim
-        ? ["SYMBOL", "SIDE", "LOT", "PNL $", "TS VIRT"]
-        : ["SYMBOL", "SIDE", "PNL $", "TS VIRT"];
+        ? ["SYMBOL", "SIDE", "NOW", "TS VIRT", "PNL $"]
+        : ["SYMBOL", "SIDE", "TS VIRT", "PNL $"];
   const align: Record<number, "right"> = {};
   headers.forEach((_, index) => {
     if (index >= 2) align[index] = "right";
@@ -420,30 +414,62 @@ export interface HistoryEntry {
   pnl: number;
 }
 
-/** Closed-trade history: symbol + P/L in USD, green when profit, red when loss. */
+/**
+ * Closed-trade history sorted by largest P/L, laid out in as many side-by-side
+ * tables as the width allows (up to five). Scrolls with its own offset.
+ */
 export function renderHistoryTable(
   history: HistoryEntry[] | undefined,
-  limit = 6,
-  width?: number,
+  rows = 4,
+  width = 60,
+  scrollOffset = 0,
 ): string {
   if (!history || history.length === 0) return style.dim("  belum ada history close");
 
-  const showSide = width === undefined || width >= 56;
-  const headers = showSide ? ["SYMBOL", "SIDE", "PNL $"] : ["SYMBOL", "PNL $"];
-  const rows = history.slice(0, limit).map((entry) => {
-    const pnlCell =
-      entry.pnl >= 0 ? style.green(`$${entry.pnl.toFixed(2)}`) : style.red(`$${entry.pnl.toFixed(2)}`);
-    return showSide
-      ? [style.bold(entry.symbol), sideLabel(entry.side), pnlCell]
-      : [style.bold(entry.symbol), pnlCell];
-  });
-  const align: Record<number, "right"> = {};
-  headers.forEach((header, index) => {
-    if (header !== "SYMBOL") align[index] = "right";
-  });
-  const body = table(headers, rows, { align, indent: "  " });
-  const extra = history.length - rows.length;
-  return extra > 0 ? `${body}\n${style.dim(`  +${extra} close lain`)}` : body;
+  const sorted = [...history].sort((a, b) => b.pnl - a.pnl);
+  // Size each mini-table from the real data so nothing is ever truncated.
+  const sample = sorted.slice(0, 200);
+  const symbolWidth = Math.max(6, ...sample.map((entry) => entry.symbol.length));
+  const pnlWidth = Math.max(5, ...sample.map((entry) => `$${entry.pnl.toFixed(2)}`.length));
+  const columnWidth = 2 + symbolWidth + 2 + pnlWidth;
+  const gap = 1;
+  const columns = Math.max(
+    1,
+    Math.min(5, Math.floor((width + gap) / (columnWidth + gap))),
+  );
+  const perCol = Math.max(1, rows);
+  const perPage = perCol * columns;
+  const start = Math.max(0, Math.min(scrollOffset, Math.max(0, sorted.length - 1)));
+  const page = sorted.slice(start, start + perPage);
+
+  const renderColumn = (slice: HistoryEntry[]): string[] => {
+    const headers = ["SYMBOL", "PNL $"];
+    const body = slice.map((entry) => [
+      style.bold(entry.symbol),
+      entry.pnl >= 0 ? style.green(`$${entry.pnl.toFixed(2)}`) : style.red(`$${entry.pnl.toFixed(2)}`),
+    ]);
+    const tableLines = table(headers, body, { align: { 1: "right" }, indent: "  " })
+      .split("\n")
+      .map((line) => pad(line, columnWidth));
+    const expected = perCol + 2;
+    while (tableLines.length < expected) tableLines.push(" ".repeat(columnWidth));
+    return tableLines.slice(0, expected);
+  };
+
+  const blocks = Array.from({ length: columns }, (_, index) =>
+    renderColumn(page.slice(index * perCol, (index + 1) * perCol)),
+  );
+  const grid: string[] = [];
+  for (let line = 0; line < perCol + 2; line += 1) {
+    grid.push(blocks.map((block) => block[line] ?? "").join(" ".repeat(gap)));
+  }
+
+  const end = Math.min(start + perPage, sorted.length);
+  const footer =
+    sorted.length > perPage
+      ? style.dim(`  [${start + 1}-${end}/${sorted.length}] · PgUp/PgDn scroll history`)
+      : "";
+  return footer ? `${grid.join("\n")}\n${footer}` : grid.join("\n");
 }
 
 // --------------------------------------------------------------------- risk
@@ -991,7 +1017,7 @@ export function renderDashboardFooter(
   const paused = state.paused ? " · PAUSED" : "";
   const keys =
     "  q quit · p pause · a agents · c chart · o orders · e events · " +
-    `r refresh · x kill · u unkill${paused} · scroll wheel / ↑↓ · g/G top`;
+    `r refresh · x kill · u unkill${paused} · wheel/↑↓ pos · PgUp/PgDn hist`;
   const scroll =
     options.scroll && options.scroll.total > options.scroll.visible
       ? `  ${options.scroll.offset + 1}-${Math.min(
@@ -1023,6 +1049,7 @@ export interface DashboardState {
   halted: boolean;
   agent?: AgentStateFile | null;
   posScroll?: number;
+  histScroll?: number;
   history?: HistoryEntry[];
 }
 
@@ -1145,24 +1172,6 @@ export function renderDashboard(state: DashboardState, layout: DashboardLayout):
     ),
   ]);
 
-  // -------------------------------------------------------- P&L chart only
-  let chartBlock = "";
-  if (state.showCharts) {
-    const chartHeight = Math.max(4, Math.min(8, height - 32));
-    // equity.points() already returns P&L (equity - start balance).
-    const pnlPoints: ChartPoint[] = equity
-      .points()
-      .filter((point) => Number.isFinite(point.value));
-    const chartLines = lineChart(pnlPoints, {
-      width: leftWidth - 4,
-      height: chartHeight,
-      currency: view.currency,
-      tone: "accent",
-      baseline: 0,
-    }).split("\n");
-    chartBlock = panel("P&L · today", chartLines, leftWidth, "blue");
-  }
-
   const accountBlock = panel(
     "ACCOUNT",
     [
@@ -1175,57 +1184,106 @@ export function renderDashboard(state: DashboardState, layout: DashboardLayout):
     "gray",
   );
 
-  // ------------------------------------------------------ right column
-  const posRows = Math.max(3, Math.min(16, height - 32));
-  const positionLines = renderPositionsTable(
-    view,
-    state.ticks,
-    posRows,
-    rightWidth,
-    state.agent?.openPositions,
-    state.posScroll ?? 0,
-  ).split("\n");
-  const positionsBlock = panel(
-    `POSITIONS · ${view.positions.length} open · ${lots.toFixed(2)} lot · sort P&L$`,
-    positionLines,
-    rightWidth,
-    "magenta",
-  );
+  // ------------------------------------------------ layout budget
+  // header (4) + agent row (10) + footer (1)
+  const bottomRows = height >= 44 ? 5 : height >= 40 ? 4 : 3;
+  const bottomPanelH = bottomRows + 2;
+  const mainHeight = Math.max(10, height - 15);
 
+  // Left column: KPI cards + P&L chart + account + history (below account, same width)
+  const leftBaseBlocks = [kpi];
+  let used = kpi.split("\n").length;
+  const accountH = 6;
+  const canAccount = mainHeight >= used + accountH + bottomPanelH + 3;
+  const reserved = used + (canAccount ? accountH : 0);
+  const chartHeight = Math.max(3, Math.min(8, mainHeight - reserved - bottomPanelH - 2));
+
+  let chartStart = "";
+  if (state.showCharts && chartHeight >= 3) {
+    const pnlPoints: ChartPoint[] = equity
+      .points()
+      .filter((point) => Number.isFinite(point.value));
+    const chartLines = lineChart(pnlPoints, {
+      width: leftWidth - 4,
+      height: chartHeight,
+      currency: view.currency,
+      tone: "accent",
+      baseline: 0,
+    }).split("\n");
+    chartStart = panel("P&L · today", chartLines, leftWidth, "blue");
+    leftBaseBlocks.push(chartStart);
+  }
+  if (canAccount) leftBaseBlocks.push(accountBlock);
+
+  const historyBlockLeft = panel(
+    `HISTORY · ${state.history?.length ?? 0} close · sort P&L$ · PgUp/PgDn`,
+    renderHistoryTable(state.history, bottomRows, leftWidth - 4, state.histScroll ?? 0).split("\n"),
+    leftWidth,
+    "gray",
+  );
+  leftBaseBlocks.push(historyBlockLeft);
+
+  let leftColumn = stack(leftBaseBlocks);
+  let leftHeight = leftColumn.split("\n").length;
+  // Pad or trim to the agreed main height so both columns stay aligned.
+  if (leftHeight < mainHeight) {
+    leftColumn += `\n${Array.from({ length: mainHeight - leftHeight }, () => " ".repeat(leftWidth)).join("\n")}`;
+    leftHeight = mainHeight;
+  } else if (leftHeight > mainHeight) {
+    leftColumn = leftColumn.split("\n").slice(0, mainHeight).join("\n");
+    leftHeight = mainHeight;
+  }
+
+  // Order rows, then positions fill the rest and events take bottom height
+  const ordersRows = state.showOrders
+    ? Math.max(2, Math.min(5, Math.floor(mainHeight / 7)))
+    : 0;
   const ordersBlock = state.showOrders
     ? panel(
         `ORDERS · ${view.orders.length} SL`,
-        renderOrdersTable(view, Math.max(2, Math.min(6, height - 38)), rightWidth).split("\n"),
+        renderOrdersTable(view, ordersRows, rightWidth).split("\n"),
         rightWidth,
         "cyan",
       )
     : "";
+  const ordersHeight = ordersBlock ? ordersBlock.split("\n").length : 0;
+
+  const buildPositions = (rows: number): { block: string; height: number } => {
+    const block = panel(
+      `POSITIONS · ${view.positions.length} open · ${lots.toFixed(2)} lot · sort P&L$`,
+      renderPositionsTable(
+        view,
+        state.ticks,
+        rows,
+        rightWidth,
+        state.agent?.openPositions,
+        state.posScroll ?? 0,
+      ).split("\n"),
+      rightWidth,
+      "magenta",
+    );
+    return { block, height: block.split("\n").length };
+  };
+
+  let posRows = Math.max(3, leftHeight - ordersHeight - bottomPanelH - 2);
+  let positions = buildPositions(posRows);
+  while (
+    leftHeight - positions.height - ordersHeight - 2 < bottomPanelH &&
+    posRows > 3
+  ) {
+    posRows -= 1;
+    positions = buildPositions(posRows);
+  }
 
   const eventsBlock = state.showEvents
-    ? panel(
-        `EVENTS · ${state.events.length}`,
-        renderEventLines(state.events, Math.max(2, Math.min(5, height - 42))).split("\n"),
-        rightWidth,
-        "gray",
-      )
+    ? (() => {
+        const lines = renderEventLines(state.events, bottomRows).split("\n");
+        while (lines.length < bottomRows) lines.push("");
+        return panel(`EVENTS · ${state.events.length}`, lines, rightWidth, "gray");
+      })()
     : "";
 
-  const rightColumn = stack([positionsBlock, ordersBlock, eventsBlock]);
-
-  // ------------------------------------------------ history under ACCOUNT
-  const leftBase = [kpi, chartBlock, accountBlock].filter((block) => block.length > 0).join("\n");
-  const rightHeight = rightColumn.split("\n").length;
-  const leftBaseHeight = leftBase.split("\n").length;
-  const historyRows = Math.max(2, Math.min(10, rightHeight - leftBaseHeight - 3));
-  const historyBlock = panel(
-    `HISTORY · ${state.history?.length ?? 0} close`,
-    renderHistoryTable(state.history, historyRows, leftWidth).split("\n"),
-    leftWidth,
-    "gray",
-  );
-
-  const leftColumn = stack([leftBase, historyBlock]);
-
+  const rightColumn = stack([positions.block, ordersBlock, eventsBlock].filter(Boolean));
   const main = row([leftColumn, rightColumn], " ");
 
   return stack([header, agentBlock, main]);

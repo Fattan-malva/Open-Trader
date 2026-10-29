@@ -106,6 +106,7 @@ export async function runDashboard(parsed: ParsedArgs): Promise<number> {
   let agentState: AgentStateFile | null = readAgentState(ctx.config.cacheDir);
   let agentReadAt = 0;
   let posScroll = 0;
+  let histScroll = 0;
   let history: HistoryEntry[] = [];
 
   const refreshAgent = (force = false): void => {
@@ -135,6 +136,7 @@ export async function runDashboard(parsed: ParsedArgs): Promise<number> {
     halted: isHalted(),
     agent: agentState,
     posScroll,
+    histScroll,
     history,
   });
 
@@ -358,11 +360,23 @@ export async function runDashboard(parsed: ParsedArgs): Promise<number> {
           continue;
         }
         if (key === "\u001b[5~") {
-          scrollBy(-10);
+          histScroll = Math.max(0, histScroll - 3);
+          draw();
           continue;
         }
         if (key === "\u001b[6~") {
-          scrollBy(10);
+          histScroll = Math.min(Math.max(0, history.length - 1), histScroll + 3);
+          draw();
+          continue;
+        }
+        if (key === "[") {
+          histScroll = Math.max(0, histScroll - 3);
+          draw();
+          continue;
+        }
+        if (key === "]") {
+          histScroll = Math.min(Math.max(0, history.length - 1), histScroll + 3);
+          draw();
           continue;
         }
         if (key === "g" || key === "\u001b[H") {
