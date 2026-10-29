@@ -148,13 +148,15 @@ instruments whose M1 ATR is too quiet or too wild.
 - **SELL** tracks the lowest ask; the virtual stop ratchets only downward.
 - A new M1 ATR is read at each closed M1 candle. If ATR shrinks, the stop may
   tighten; if ATR grows, the stop does not loosen.
-- TS VIRT updates from the best executable price while the position moves
-  favorably. Its distance is dynamic: `max(ATR × factor, minimum pips)`.
-- The stop only ratchets in the protective direction: upward for BUY, downward
-  for SELL. A retracement never moves TS VIRT back to a worse level.
-- Profit protection is armed when TS VIRT itself crosses the entry price; no
-  fixed USD activation or lock threshold is used.
-- A BUY closes when `bid ≤ TS VIRT`; a SELL closes when `ask ≥ TS VIRT`.
+- TS VIRT is calculated from the best executable price and a dynamic
+  distance: `max(ATR × factor, minimum pips)`.
+- The first published TS VIRT update is held until it is already beyond entry
+  in the profitable direction. After that first profit-locking move, the stop
+  ratchets only farther into profit and never moves backwards.
+- No fixed USD activation or lock threshold is used. BUY profit lock uses a
+  stop above entry; SELL profit lock uses a stop below entry.
+- A BUY closes when a fresh quote has `bid ≤ TS VIRT`; a SELL closes when a
+  fresh quote has `ask ≥ TS VIRT`. Stale quotes cannot trigger a TS close.
 - After profit-lock activation, the agent periodically tries to move the broker
   emergency SL in the protective direction. Broker minimum-distance rules may
   reject stops that are too close; failures are written to the log.
