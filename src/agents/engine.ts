@@ -1,0 +1,540 @@
+import fs from "node:fs";
+import path from "node:path";
+
+import { sleep } from "../exness/client.js";
+import type { Tools } from "../tools/index.js";
+import type { TradeTools } from "../tools/trading.js";
+import type { EventHub, TickHub } from "../runtime/hubs.js";
+import type { AccountView, SnapshotCache } from "../runtime/snapshot.js";
+import { dropFormingCandle, type NormalizedCandle } from "../market/candles.js";
+import { timeframeMs } from "../market/timeframes.js";
+import type { EquityTracker } from "../monitor/equity.js";
+import type { AgentConfig } from "./config.js";
+import { decideEntry, entryConfigFrom, type EntrySignal } from "./entry.js";
+import type { AgentActivity, AgentJournal, AgentRole, AgentTone } from "./journal.js";
+import type { Candidate, ScanDiagnostics } from "./screener.js";
+import { Screener, screenerOptionsFrom } from "./screener.js";
+import type { ExecutorState, RealizedStats, RiskExecutor, TradeLogEntry } from "./risk-and-executor.js";
+
+const SCAN_GRACE_MS = 2_000;
+
+export interface AgentStateFile {
+  running: boolean;
+  mode: "live" | "dry-run";
+  updatedAt: number;
+  startedAt: number;
+  universe: number;
+  nextScanAt: number;
+  timeframes: {
+    screener: string;
+    trend: string;
+    confirm: string;
+    trail: string;
+  };
+  screener: {
+    at: number;
+    durationMs: number;
+    pass: number;
+    candidates: Array<{
+      symbol: string;
+      direction: string;
+      score: number;
+      spreadPct: number;
+      spreadPips: number;
+      rsi: number;
+      atrPct: number;
+      reasons: string[];
+    }>;
+    diagnostics?: ScanDiagnostics;
+  };
+  lastSignal:
+    | {
+        at: number;
+        symbol: string;
+        side: string;
+        lot: number;
+        entry: number;
+        sl: number;
+        trail: number;
+        score: number;
+        reasons: string[];
+      }
+    | null;
+  trailing: Array<{ at: number; symbol: string; positionId: string; sl: number }>;
+  openPositions: Array<{
+    positionId: string;
+    symbol: string;
+    side: string;
+    volume: number;
+    entry: number;
+    /** broker-side emergency SL */
+    sl: number;
+    /** program-side virtual trailing stop */
+    trail: number;
+    best: number;
+    trailDistance: number;
+    atr: number;
+    score: number;
+  }>;
+  stats: RealizedStats & { winRate: number };
+  dailyPnl: number;
+  note?: string;
+  /** Per-agent activity feed for the dashboard containers. */
+  activity?: AgentActivity[];
+  tradeLog: TradeLogEntry[];
+  /** Full executor state (managed positions with SL/trail metadata) for restarts. */
+  executor: ExecutorState;
+}
+
+export interface EngineDeps {
+  config: AgentConfig;
+  live: boolean;
+  universe: string[];
+  cacheDir: string;
+  tools: Tools;
+  tradeTools: TradeTools;
+  ticks: TickHub;
+  events: EventHub;
+  snapshot: SnapshotCache;
+  equity: EquityTracker;
+  executor: RiskExecutor;
+  journal: AgentJournal;
+  log: (line: string) => void;
+  stateFile?: string;
+}
+
+export class AgentEngine {
+  readonly screener: Screener;
+  private readonly stateFile: string;
+  private readonly journal: AgentJournal;
+  private startedAt = 0;
+  private running = false;
+  private stopped = false;
+  private scanning = false;
+  private managing = false;
+  private lastScanAt = 0;
+  private lastScanDurationMs = 0;
+  private candidates: Candidate[] = [];
+  private lastSignal: EntrySignal & { lot?: number } | null = null;
+  private note = "";
+  private lastView?: AccountView;
+  private lastGateLog = "";
+  private nextScanAt = 0;
+  private feedDownSince = 0;
+  private lastFeedWarnAt = 0;
+  private lastFeedRestartAt = 0;
+  private manageBackoffUntil = 0;
+  private lastManageErrorAt = 0;
+
+  constructor(private readonly deps: EngineDeps) {
+    this.screener = new Screener(deps.tools, deps.ticks, screenerOptionsFrom(deps.config));
+    this.stateFile = deps.stateFile ?? path.join(deps.cacheDir, "agent-state.json");
+    this.journal = deps.journal;
+    this.deps.ticks.onQuote = (quote) => this.screener.observe(quote);
+  }
+
+  /** Record an activity line for one agent and mirror it to stdout. */
+  private record(agent: AgentRole, message: string, tone: AgentTone = "info"): void {
+    this.journal.record(agent, message, tone);
+    this.deps.log(message);
+  }
+
+  /** Restore executor state from the previous run (positions survive restarts). */
+  restore(): void {
+    try {
+      const raw = JSON.parse(fs.readFileSync(this.stateFile, "utf8")) as AgentStateFile;
+      this.deps.executor.restore(raw.executor);
+      this.journal.restore(raw.activity);
+    } catch {
+      // first run
+    }
+  }
+
+  async start(): Promise<void> {
+    if (this.running) return;
+    this.running = true;
+    this.stopped = false;
+    this.startedAt = Date.now();
+    this.restore();
+
+    this.record(
+      "screener",
+      `agent ${this.deps.live ? "LIVE" : "DRY-RUN"} · ${this.deps.universe.length} pairs · ` +
+        `screener ${this.deps.config.screenerTimeframe} · trend ${this.deps.config.trendTimeframe} · ` +
+        `confirm ${this.deps.config.confirmTimeframe} · trail ${this.deps.config.trailTimeframe} · ` +
+        `risk ${this.deps.config.riskPct}% of ${this.deps.config.virtualEquity} USD · ` +
+        `no position cap · emergency ${this.deps.config.emergencySlAtrFactor}×ATR · ` +
+        `trail ${this.deps.config.trailAtrFactor}×ATR (min ${this.deps.config.trailMinPips}p)`,
+    );
+    this.writeState();
+    this.deps.events.start();
+    this.deps.ticks.start(this.deps.universe);
+    for (let i = 0; i < 50 && this.deps.events.state !== "open"; i += 1) {
+      if (this.stopped) return;
+      await sleep(100);
+    }
+    // The WS subscribes one instrument per message (~20/s). Scanning after the
+    // very first tick would only see a handful of pairs and waste the cycle.
+    // Some instruments are quiet, so wait for a healthy sample, not all of them.
+    const warmTarget = Math.min(this.deps.universe.length, 120);
+    for (let i = 0; i < 160 && this.deps.ticks.quotesCount < warmTarget; i += 1) {
+      if (this.stopped) return;
+      await sleep(250);
+    }
+    if (this.stopped) return;
+    this.record(
+      "screener",
+      `feed warm ${this.deps.ticks.quotesCount}/${this.deps.universe.length} quotes · starting scan`,
+    );
+
+    this.writeState();
+    this.schedule();
+    await this.scanAndEnter();
+  }
+
+  schedule(): void {
+    const manage = setInterval(() => {
+      void this.manageTick();
+    }, this.deps.config.manageIntervalMs);
+    manage.unref();
+    this.loopTimers = [manage];
+    this.scheduleScan();
+  }
+
+  private scheduleScan(): void {
+    if (this.stopped) return;
+    const now = Date.now();
+    const interval = timeframeMs(this.deps.config.screenerTimeframe);
+    const delay = this.deps.config.alignScanToCandle
+      ? interval - (now % interval) + SCAN_GRACE_MS
+      : Math.max(1_000, this.deps.config.scanIntervalMs);
+    this.nextScanAt = now + delay;
+    const timer = setTimeout(() => {
+      void this.scanAndEnter().finally(() => this.scheduleScan());
+    }, delay);
+    timer.unref();
+    this.loopTimers.push(timer);
+  }
+
+  private loopTimers: NodeJS.Timeout[] = [];
+
+  stop(): void {
+    this.stopped = true;
+    this.running = false;
+    this.nextScanAt = 0;
+    for (const timer of this.loopTimers) clearInterval(timer);
+    this.loopTimers = [];
+    this.journal.record("screener", "agent stopped · state saved", "warn");
+    this.writeState();
+  }
+
+  private async manageTick(): Promise<void> {
+    if (this.managing || this.stopped) return;
+    if (Date.now() < this.manageBackoffUntil) return;
+    this.managing = true;
+    try {
+      this.watchdog();
+      const view = await this.deps.snapshot.get();
+      this.deps.equity.record(view);
+      await this.deps.executor.manage(view);
+      // Write after every manage tick so a trail advance or close is not lost
+      // if the process dies before the next 5s state throttle.
+      this.writeState(view);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const rateLimited = /REQUEST_RATE_LIMIT|rate.?limit/i.test(message);
+      if (rateLimited) {
+        // Multiple terminals/scans share the broker's account-wide bucket.
+        // Back off instead of retrying every second and making it worse.
+        this.manageBackoffUntil = Date.now() + 15_000;
+      }
+      const now = Date.now();
+      if (now - this.lastManageErrorAt > (rateLimited ? 30_000 : 5_000)) {
+        this.lastManageErrorAt = now;
+        this.record("trader", `manage error: ${message}`, "error");
+      }
+    } finally {
+      this.managing = false;
+    }
+  }
+
+  /**
+   * Watchdog: the WS layer reconnects with backoff, but a wedged connection
+   * needs a nudge. Alarm once, then force a fresh socket after 45 seconds.
+   */
+  private watchdog(): void {
+    const now = Date.now();
+    const state = this.deps.ticks.state;
+    if (state === "open") {
+      this.feedDownSince = 0;
+      const lastTick = this.deps.ticks.lastTickAt;
+      if (lastTick > 0 && now - lastTick > 60_000 && now - this.lastFeedWarnAt > 60_000) {
+        this.lastFeedWarnAt = now;
+        this.record(
+          "trader",
+          `watchdog: no ticks for ${Math.round((now - lastTick) / 1000)}s · ${this.deps.ticks.quotesCount} quotes cached`,
+          "warn",
+        );
+      }
+      return;
+    }
+
+    if (this.feedDownSince === 0) this.feedDownSince = now;
+    const downMs = now - this.feedDownSince;
+    if (downMs > 5_000 && now - this.lastFeedWarnAt > 30_000) {
+      this.lastFeedWarnAt = now;
+      this.record("trader", `watchdog: tick feed ${state} for ${Math.round(downMs / 1000)}s`, "warn");
+    }
+    if (downMs > 45_000 && now - this.lastFeedRestartAt > 60_000) {
+      this.lastFeedRestartAt = now;
+      this.feedDownSince = now;
+      this.record("trader", "watchdog: restarting tick websocket", "error");
+      this.deps.ticks.restart();
+    }
+  }
+
+  async scanAndEnter(): Promise<void> {
+    if (this.scanning || this.stopped) return;
+    this.scanning = true;
+    const started = Date.now();
+    try {
+      this.record("screener", `scan started · ${this.deps.universe.length} pairs`);
+      const candidates = await this.screener.scan(this.deps.universe);
+      if (this.stopped) return;
+      this.candidates = candidates;
+      this.lastScanAt = started;
+      this.lastScanDurationMs = this.screener.lastScanDurationMs;
+
+      let view = await this.deps.snapshot.get();
+      const gate = this.deps.executor.tradingAllowed(view);
+      this.note = gate.ok ? "" : gate.reason ?? "";
+
+      const diagnostics = this.screener.lastDiagnostics;
+      this.record(
+        "screener",
+        `fresh ${diagnostics.fresh}/${diagnostics.withQuote} · prefilter ${diagnostics.prefiltered} · ` +
+          `shortlist ${diagnostics.shortlist} · candle fail ${diagnostics.candleFails} · pass ${diagnostics.passed}`,
+      );
+      if (diagnostics.top.length > 0) {
+        this.record(
+          "screener",
+          `top ${diagnostics.top
+            .slice(0, 4)
+            .map((entry) => `${entry.symbol} ${entry.prelim}`)
+            .join(" · ")}`,
+        );
+      }
+      this.record(
+        "screener",
+        `scan ${((Date.now() - started) / 1000).toFixed(1)}s · ${candidates.length} kandidat` +
+          (candidates[0]
+            ? ` · ${candidates[0].symbol} ${candidates[0].direction} ${candidates[0].score.toFixed(0)}`
+            : "") +
+          (gate.ok ? "" : ` · ${gate.reason}`),
+        gate.ok ? "success" : "warn",
+      );
+
+      if (!gate.ok) {
+        this.writeState(view);
+        return;
+      }
+
+      // Every pair the screener passes is a candidate. Entry needs only the
+      // last closed confirmation candle; there is no M5 step and no TP.
+      const tried: string[] = [];
+      const entered: string[] = [];
+      for (const candidate of candidates) {
+        if (this.stopped) return;
+        const quote = this.deps.ticks.get(candidate.symbol);
+        if (!quote) {
+          tried.push(`${candidate.symbol}: no live quote`);
+          continue;
+        }
+
+        const confirmation = await this.confirmationFor(candidate);
+        if (!confirmation.ok) {
+          tried.push(`${candidate.symbol}: ${confirmation.reason}`);
+          continue;
+        }
+
+        const decision = decideEntry({
+          candidate,
+          quote,
+          config: entryConfigFrom(this.deps.config),
+          confirmCandles: confirmation.candles,
+        });
+        if (!decision.signal) {
+          tried.push(`${candidate.symbol}: ${decision.rejects[0] ?? "no signal"}`);
+          continue;
+        }
+
+        this.lastSignal = decision.signal;
+        this.record(
+          "entry",
+          `sinyal ${decision.signal.side.toUpperCase()} ${candidate.symbol} ` +
+            `entry ${decision.signal.entry} emergency SL ${decision.signal.emergencySl} ` +
+            `trail ${decision.signal.trailDistance.toFixed(5)} ` +
+            `(${decision.signal.slPips.toFixed(1)}p)`,
+          "success",
+        );
+
+        if (!this.deps.live) {
+          entered.push(`${candidate.symbol} (dry)`);
+          continue;
+        }
+
+        // Refresh the snapshot so margin and per-symbol limits see the
+        // positions opened earlier in this same scan.
+        view = await this.deps.snapshot.get();
+        const opened = await this.deps.executor.open(decision.signal, view);
+        if (opened.ok && opened.managed) {
+          this.lastSignal = { ...decision.signal, lot: opened.managed.volume };
+          entered.push(`${opened.managed.symbol} ${opened.managed.volume} lot`);
+          this.record(
+            "entry",
+            `open ${opened.managed.symbol} ${opened.managed.volume} lot ` +
+              `@ ${opened.managed.entry} emergency SL ${opened.managed.emergencySl} ` +
+              `virtual ${opened.managed.trailStop}`,
+            "success",
+          );
+          continue;
+        }
+        this.record(
+          "entry",
+          `open ditolak ${candidate.symbol}: ${opened.reason ?? "?"}`,
+          "warn",
+        );
+        tried.push(`${candidate.symbol}: ${opened.reason ?? "rejected"}`);
+      }
+
+      if (entered.length > 0) {
+        this.note = this.deps.live
+          ? `opened ${entered.length}: ${entered.join(" · ")}`
+          : `dry-run signals: ${entered.join(" · ")}`;
+      } else if (tried.length > 0) {
+        this.note = tried[0] ?? "";
+        this.record("entry", `entry ${tried.join(" · ")}`, "warn");
+      }
+      this.writeState(view);
+    } catch (error) {
+      this.record(
+        "screener",
+        `scan error: ${error instanceof Error ? error.message : String(error)}`,
+        "error",
+      );
+    } finally {
+      this.scanning = false;
+    }
+  }
+
+  private async confirmationFor(
+    candidate: Candidate,
+  ): Promise<{ ok: true; candles?: NormalizedCandle[] } | { ok: false; reason: string }> {
+    if (this.deps.config.confirmTimeframe === this.deps.config.screenerTimeframe) {
+      return { ok: true };
+    }
+    const result = await this.deps.tools.get_candles({
+      symbol: candidate.symbol,
+      timeframe: this.deps.config.confirmTimeframe,
+      n: 120,
+    });
+    if (!result.ok) {
+      return { ok: false, reason: `confirm candles: ${result.message}` };
+    }
+    const candles = dropFormingCandle(
+      result.data,
+      timeframeMs(this.deps.config.confirmTimeframe),
+    );
+    if (candles.length < 2) {
+      return { ok: false, reason: `confirm candles not ready` };
+    }
+    return { ok: true, candles };
+  }
+
+  state(view?: AccountView): AgentStateFile {
+    const stats = this.deps.executor.stats;
+    const decided = stats.wins + stats.losses;
+    const lastSignal = this.lastSignal;
+    const trailing = this.deps.executor.statePayload().trailing;
+    // stop() writes the final state without a fresh snapshot. Reuse the last
+    // one so the dashboard does not show daily P/L resetting to zero.
+    const lastView = view ?? this.lastView;
+
+    return {
+      running: this.running,
+      mode: this.deps.live ? "live" : "dry-run",
+      updatedAt: Date.now(),
+      startedAt: this.startedAt,
+      universe: this.deps.universe.length,
+      nextScanAt: this.nextScanAt,
+      timeframes: {
+        screener: this.deps.config.screenerTimeframe,
+        trend: this.deps.config.trendTimeframe,
+        confirm: this.deps.config.confirmTimeframe,
+        trail: this.deps.config.trailTimeframe,
+      },
+      screener: {
+        at: this.lastScanAt,
+        durationMs: this.lastScanDurationMs,
+        pass: this.candidates.length,
+        candidates: this.candidates.map((candidate) => ({
+          symbol: candidate.symbol,
+          direction: candidate.direction,
+          score: Number(candidate.score.toFixed(1)),
+          spreadPct: Number(candidate.spreadPct.toFixed(4)),
+          spreadPips: Number(candidate.spreadPips.toFixed(2)),
+          rsi: Number(candidate.rsi.toFixed(1)),
+          atrPct: Number(candidate.atrPct.toFixed(3)),
+          reasons: candidate.reasons,
+        })),
+        diagnostics: this.screener.lastDiagnostics,
+      },
+      lastSignal: lastSignal
+        ? {
+            at: lastSignal.createdAt,
+            symbol: lastSignal.symbol,
+            side: lastSignal.side,
+            lot: lastSignal.lot ?? 0,
+            entry: lastSignal.entry,
+            sl: lastSignal.emergencySl,
+            trail: lastSignal.trailDistance,
+            score: lastSignal.score,
+            reasons: lastSignal.reasons,
+          }
+        : null,
+      trailing: trailing.slice(-8),
+      openPositions: [...this.deps.executor.managed.values()].map((position) => ({
+        positionId: position.positionId,
+        symbol: position.symbol,
+        side: position.side,
+        volume: position.volume,
+        entry: position.entry,
+        sl: position.emergencySl,
+        trail: position.trailStop,
+        best: position.best,
+        trailDistance: position.trailDistance,
+        atr: position.atr,
+        score: position.score,
+      })),
+      stats: {
+        ...stats,
+        winRate: decided > 0 ? (stats.wins / decided) * 100 : 0,
+      },
+      dailyPnl: lastView ? lastView.equity - this.deps.equity.startBalance : 0,
+      note: this.note,
+      activity: this.journal.recent(80),
+      tradeLog: this.deps.executor.statePayload().tradeLog,
+      executor: this.deps.executor.statePayload(),
+    };
+  }
+
+  writeState(view?: AccountView): void {
+    if (view) this.lastView = view;
+    try {
+      fs.mkdirSync(path.dirname(this.stateFile), { recursive: true });
+      fs.writeFileSync(this.stateFile, `${JSON.stringify(this.state(view), null, 2)}\n`);
+    } catch {
+      // monitoring is best effort
+    }
+  }
+}

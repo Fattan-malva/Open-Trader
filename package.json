@@ -1,0 +1,24 @@
+{
+  "name": "open-trader",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Exness Trader API terminal trading system",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "tsx src/cli/index.ts dashboard",
+    "test": "node --import tsx --test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/ws": "^8.5.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
