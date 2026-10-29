@@ -810,22 +810,22 @@ function lastAgentActivity(
 
 /** Recent log lines for one agent role, shown under its own card. */
 function conciseAgentMessage(entry: AgentActivity): string {
-  const message = entry.message.replace(/\\s+/g, " ").trim();
-  const symbol = message.match(/\\b([A-Z][A-Z0-9._-]{2,})\\b/g)?.find((token) =>
+  const message = entry.message.replace(/\s+/g, " ").trim();
+  const symbol = message.match(/\b([A-Z][A-Z0-9._-]{2,})\b/g)?.find((token) =>
     !["CLOSE", "OPEN", "TS", "SL", "TRAIL", "ERROR", "ERR", "SKIP", "SCAN", "ENTRY", "BUY", "SELL", "PASS", "NO", "SIGNAL", "PROTECT", "ADOPT", "VIRTUAL", "HIT"].includes(token),
   );
 
   if (entry.agent === "trader") {
-    const pnl = message.match(/net (-?\\d+(?:\\.\\d+)?) USD/i);
+    const pnl = message.match(/net (-?\d+(?:\.\d+)?) USD/i);
     if (/close|closed|net /i.test(message) && pnl) {
       // Always retain the instrument on close events; the P/L is realized later.
       return `CLOSE ${symbol ?? "?"} ${Number(pnl[1]) >= 0 ? "+" : ""}${Number(pnl[1]).toFixed(2)}`;
     }
-    const lock = message.match(/profit-lock activated.*?\\+?([0-9.]+) USD/i);
+    const lock = message.match(/profit-lock activated.*?\+?([0-9.]+) USD/i);
     if (lock) return `TS ${symbol ?? "?"} +${Number(lock[1]).toFixed(2)}`;
     const opened = message.match(/open ([A-Z0-9._-]+) ([0-9.]+) lot.*?@ ([0-9.]+)/i);
     if (opened) return `OPEN ${opened[1]} ${opened[2]} @ ${opened[3]}`;
-    const trail = message.match(/→\\s*([0-9.]+)/);
+    const trail = message.match(/→\s*([0-9.]+)/);
     const pips = message.match(/trail ([0-9.]+)p/i);
     if (/trail|TS VIRTUAL hit/i.test(message)) {
       return trail
@@ -837,8 +837,8 @@ function conciseAgentMessage(entry: AgentActivity): string {
       return `SL ${symbol ?? "?"} ${sl ? `→ ${sl[1]}` : "adjusted"}`;
     }
     if (/close failed/i.test(message)) return `CLOSE ERR ${symbol ?? "?"}`;
-    if (/\\b(open|adopt)\\b/i.test(message)) return `OPEN ${symbol ?? "?"}`;
-    if (/\\b(skip|error)\\b/i.test(message)) return `${/error/i.test(message) ? "ERR" : "SKIP"} ${symbol ?? ""}`.trim();
+    if (/\b(open|adopt)\b/i.test(message)) return `OPEN ${symbol ?? "?"}`;
+    if (/\b(skip|error)\b/i.test(message)) return `${/error/i.test(message) ? "ERR" : "SKIP"} ${symbol ?? ""}`.trim();
   }
 
   if (entry.agent === "screener") {
@@ -849,8 +849,8 @@ function conciseAgentMessage(entry: AgentActivity): string {
   }
 
   if (entry.agent === "entry") {
-    const side = message.match(/\\b(buy|sell)\\b/i)?.[1]?.toUpperCase();
-    const lot = message.match(/([0-9]+(?:\\.[0-9]+)?)\\s*lot/i)?.[1];
+    const side = message.match(/\b(buy|sell)\b/i)?.[1]?.toUpperCase();
+    const lot = message.match(/([0-9]+(?:\.[0-9]+)?)\s*lot/i)?.[1];
     if (/reject|blocked|skip|denied/i.test(message)) return `REJECT ${symbol ?? ""}`.trim();
     if (/confirm|opened|placed|executed|entry/i.test(message)) {
       return [side ?? "ENTRY", symbol, lot ? `${lot}L` : undefined].filter(Boolean).join(" ");
