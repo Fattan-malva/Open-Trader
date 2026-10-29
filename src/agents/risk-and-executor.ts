@@ -1330,28 +1330,23 @@ export class RiskExecutor {
     const now = Date.now();
     if (now < (managed.closeRetryAt ?? 0)) return;
     if (this.busy.has(managed.positionId)) {
-      managed.closeRetryAt = now + TS_CLOSE_RETRY_MS;
+      // Usually an emergency-SL update is still awaiting broker acknowledgement.
+      // Queue the exit immediately after that mutation releases the position lock.
+      managed.closeRetryAt = now + TS_CLOSE_BUSY_RETRY_MS;
       return;
     }
     managed.closing = true;
-    managed.closeRetryAt = now + TS_CLOSE_RETRY_MS;
     this.busy.add(managed.positionId);
     try {
       const result = await this.deps.tools.close(managed.positionId);
       if (!result.ok) {
-        managed.closing = false;
-        managed.closeRequested ??= reason;
-        managed.lastError = result.errorMessage ?? result.status;
-        this.log({
-          at: Date.now(),
-          action: "error",
-          symbol: managed.symbol,
-          positionId: managed.positionId,
-          reason: `close failed: ${managed.lastError}`,
-          ok: false,
-        });
+        const message = result.errorMessage ?? result.status;
+        await this.handleCloseFailure(managed, reason, message, "rejected");
         return;
       }
+      managed.closeAttempts = 0;
+      managed.closeRetryAt = 0;
+      managed.lastError = undefined;
       this.log({
         at: Date.now(),
         action: "close",
@@ -1364,22 +1359,74 @@ export class RiskExecutor {
         ok: true,
       });
     } catch (error) {
-      managed.closing = false;
-      managed.closeRequested ??= reason;
-      managed.lastError = error instanceof Error ? error.message : String(error);
-      this.log({
-        at: Date.now(),
-        action: "error",
-        symbol: managed.symbol,
-        positionId: managed.positionId,
-        reason: `close error: ${managed.lastError} · retry pending`,
-        ok: false,
-      });
+      const message = error instanceof Error ? error.message : String(error);
+      await this.handleCloseFailure(managed, reason, message, "error");
     } finally {
       this.busy.delete(managed.positionId);
     }
   }
 
+  /**
+   * Reconcile after every unsuccessful close, because a timeout/rejection may
+   * arrive after the broker has already removed the position. If it is still
+   * open, preserve the original TS trigger and retry with bounded backoff.
+   */
+  private async handleCloseFailure(
+    managed: ManagedPosition,
+    reason: string,
+    message: string,
+    kind: "rejected" | "error",
+  ): Promise<void> {
+    managed.closing = false;
+    managed.closeRequested ??= reason;
+    managed.lastError = message;
+
+    let snapshotOpen: boolean | undefined;
+    try {
+      this.deps.tools.invalidateSnapshot();
+      const fresh = await this.deps.tools.view(true);
+      snapshotOpen = fresh.positions.some((position) => position.position_id === managed.positionId);
+    } catch {
+      // When reconciliation is unavailable, keep the close request and retry.
+      // An ambiguous timeout must never be assumed to mean the trade is closed.
+    }
+
+    if (snapshotOpen === false) {
+      managed.closing = true;
+      managed.closeRequested = undefined;
+      managed.closeRetryAt = 0;
+      managed.closeAttempts = 0;
+      const goneNote = indicatesPositionAlreadyClosed(message)
+        ? "broker also reported that the position is already gone"
+        : "broker snapshot confirms the position is absent";
+      this.log({
+        at: Date.now(),
+        action: "close",
+        symbol: managed.symbol,
+        positionId: managed.positionId,
+        side: managed.side,
+        volume: managed.volume,
+        price: managed.trailStop,
+        reason: "close reconciled: " + goneNote + " after API " + kind + " (" + message + "); P/L finalization pending",
+        ok: true,
+      });
+      return;
+    }
+
+    managed.closeAttempts = (managed.closeAttempts ?? 0) + 1;
+    const delay = closeRetryDelayMs(managed.closeAttempts, message);
+    managed.closeRetryAt = Date.now() + delay;
+    const movingPrice = /off quotes|requote|price changed|price moved|quote expired|price deviation|market price changed/i.test(message);
+    this.log({
+      at: Date.now(),
+      action: "error",
+      symbol: managed.symbol,
+      positionId: managed.positionId,
+      reason: "close " + kind + " (attempt " + managed.closeAttempts + "; retry in " + delay + "ms" +
+        (movingPrice ? "; moving-price retry" : "") + "): " + message,
+      ok: false,
+    });
+  }
   private async finalize(managed: ManagedPosition): Promise<void> {
     let realized = this.realized.get(managed.positionId);
     if (realized === undefined) {
