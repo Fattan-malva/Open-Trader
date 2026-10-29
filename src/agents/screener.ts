@@ -1,4 +1,5 @@
 import type { Quote } from "../market/store.js";
+import { categorize, type InstrumentCategory } from "../exness/catalog.js";
 import type { NormalizedCandle } from "../market/candles.js";
 import { dropFormingCandle, pipSize } from "../market/candles.js";
 import {
@@ -64,6 +65,9 @@ export interface ScreenerOptions {
   minScore: number;
   maxSpreadPips: number;
   maxSpreadPct: number;
+  maxMetalSpreadPct?: number;
+  maxCryptoSpreadPct?: number;
+  maxEnergySpreadPct?: number;
   maxSpreadSpikeRatio: number;
   maxSpreadTrailRatio: number;
   minAtrPct: number;
@@ -89,6 +93,77 @@ interface MomentumSample {
 interface ActivityBin {
   second: number;
   ticks: number;
+}
+
+export interface RankedSymbol {
+  quote: Quote;
+  mom5: number | null;
+  prelim: number;
+}
+
+const CATEGORY_SCAN_ORDER: InstrumentCategory[] = [
+  "metals", "crypto", "energy", "fx", "other", "index", "stock",
+];
+
+/**
+ * Keep the shortlist balanced across instrument categories, pin XAUUSD when
+ * it has a fresh/in-cap quote, and rotate the non-top slots so one busy market
+ * cannot permanently starve every other tradable symbol.
+ */
+export function selectFairShortlist(
+  entries: RankedSymbol[],
+  shortlistSize: number,
+  now = Date.now(),
+): RankedSymbol[] {
+  if (entries.length === 0) return [];
+  const groups = new Map<InstrumentCategory, RankedSymbol[]>();
+  for (const entry of entries) {
+    const category = categorize(entry.quote.symbol);
+    const group = groups.get(category) ?? [];
+    group.push(entry);
+    groups.set(category, group);
+  }
+
+  const categories = CATEGORY_SCAN_ORDER.filter((category) => (groups.get(category)?.length ?? 0) > 0);
+  const budget = Math.min(entries.length, Math.max(categories.length, Math.trunc(shortlistSize)));
+  const baseQuota = Math.floor(budget / categories.length);
+  const remainderQuota = budget % categories.length;
+  const selected = new Map<string, RankedSymbol>();
+  const rotationEpoch = Math.floor(now / 10_000);
+
+  categories.forEach((category, categoryIndex) => {
+    const group = (groups.get(category) ?? []).slice().sort((a, b) => b.prelim - a.prelim);
+    const quota = baseQuota + (categoryIndex < remainderQuota ? 1 : 0);
+    if (quota <= 0) return;
+
+    const pinned = category === "metals"
+      ? group.find((entry) => /^XAUUSD(?:$|[._-])/.test(entry.quote.symbol))
+      : undefined;
+    const ranked = group.filter((entry) => entry !== pinned);
+    const available = Math.max(0, quota - (pinned ? 1 : 0));
+    const hotCount = Math.min(available, Math.max(0, Math.ceil(available / 2)));
+    const chosen: RankedSymbol[] = pinned ? [pinned] : [];
+    chosen.push(...ranked.slice(0, hotCount));
+
+    const rotationPool = ranked.slice(hotCount).sort((a, b) => a.quote.symbol.localeCompare(b.quote.symbol));
+    const rotationSlots = Math.min(Math.max(0, quota - chosen.length), rotationPool.length);
+    if (rotationPool.length > 0 && rotationSlots > 0) {
+      const offset = (rotationEpoch * rotationSlots) % rotationPool.length;
+      for (let i = 0; i < rotationSlots; i += 1) {
+        chosen.push(rotationPool[(offset + i) % rotationPool.length]!);
+      }
+    }
+    for (const entry of chosen) selected.set(entry.quote.symbol, entry);
+  });
+
+  // If a category contains fewer symbols than its quota, reassign the unused
+  // slots to the best remaining quotes rather than returning an undersized list.
+  const fallback = entries.slice().sort((a, b) => b.prelim - a.prelim);
+  for (const entry of fallback) {
+    if (selected.size >= budget) break;
+    selected.set(entry.quote.symbol, entry);
+  }
+  return [...selected.values()].sort((a, b) => b.prelim - a.prelim).slice(0, budget);
 }
 
 const MOMENTUM_WINDOW_MS = 15 * 60_000;
@@ -473,7 +548,7 @@ export class Screener {
 
     const now = Date.now();
     type Pre = { quote: Quote; mom5: number | null; prelim: number };
-    const pre: Pre[] = [];
+    const pre: RankedSymbol[] = [];
     let withQuote = 0;
     let fresh = 0;
     let spreadRejected = 0;
@@ -502,8 +577,7 @@ export class Screener {
       pre.push({ quote, mom5, prelim });
     }
 
-    pre.sort((a, b) => b.prelim - a.prelim);
-    const shortlist = pre.slice(0, this.options.shortlistSize);
+    const shortlist = selectFairShortlist(pre, this.options.shortlistSize, now);
 
     const candidates: Candidate[] = [];
     let candleFails = 0;
@@ -587,6 +661,9 @@ export function screenerOptionsFrom(config: AgentConfig): ScreenerOptions {
     minScore: config.minScore,
     maxSpreadPips: config.maxSpreadPips,
     maxSpreadPct: config.maxSpreadPct,
+    maxMetalSpreadPct: config.maxMetalSpreadPct,
+    maxCryptoSpreadPct: config.maxCryptoSpreadPct,
+    maxEnergySpreadPct: config.maxEnergySpreadPct,
     maxSpreadSpikeRatio: config.maxSpreadSpikeRatio,
     maxSpreadTrailRatio: config.maxSpreadTrailRatio,
     minAtrPct: config.minAtrPct,
