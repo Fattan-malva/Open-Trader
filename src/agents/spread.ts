@@ -5,6 +5,9 @@ import type { Quote } from "../market/store.js";
 export interface SpreadLimits {
   maxSpreadPips: number;
   maxSpreadPct: number;
+  maxMetalSpreadPct?: number;
+  maxCryptoSpreadPct?: number;
+  maxEnergySpreadPct?: number;
   /** Reject sudden spread expansions compared with this symbol's recent median. */
   maxSpreadSpikeRatio?: number;
 }
@@ -83,9 +86,18 @@ export function assessSpread(
   quote: Quote,
   limits: SpreadLimits,
 ): SpreadAssessment {
-  const fx = categorize(symbol) === "fx";
+  const category = categorize(symbol);
+  const fx = category === "fx";
   const value = fx ? spreadPips(symbol, quote) : quote.spreadPct;
-  const hardLimit = fx ? limits.maxSpreadPips : limits.maxSpreadPct;
+  const hardLimit = fx
+    ? limits.maxSpreadPips
+    : category === "metals"
+      ? limits.maxMetalSpreadPct ?? limits.maxSpreadPct
+      : category === "crypto"
+        ? limits.maxCryptoSpreadPct ?? limits.maxSpreadPct
+        : category === "energy"
+          ? limits.maxEnergySpreadPct ?? limits.maxSpreadPct
+          : limits.maxSpreadPct;
   const unit = fx ? "pips" : "pct";
   if (
     !Number.isFinite(value) ||
@@ -160,6 +172,14 @@ export function spreadQuality(symbol: string, quote: Quote, limits: SpreadLimits
     if (!Number.isFinite(pips) || limits.maxSpreadPips <= 0) return 0;
     return Math.max(0, Math.min(1, 1 - pips / limits.maxSpreadPips));
   }
-  if (!Number.isFinite(quote.spreadPct) || limits.maxSpreadPct <= 0) return 0;
-  return Math.max(0, Math.min(1, 1 - quote.spreadPct / limits.maxSpreadPct));
+  const category = categorize(symbol);
+  const limit = category === "metals"
+    ? limits.maxMetalSpreadPct ?? limits.maxSpreadPct
+    : category === "crypto"
+      ? limits.maxCryptoSpreadPct ?? limits.maxSpreadPct
+      : category === "energy"
+        ? limits.maxEnergySpreadPct ?? limits.maxSpreadPct
+        : limits.maxSpreadPct;
+  if (!Number.isFinite(quote.spreadPct) || limit <= 0) return 0;
+  return Math.max(0, Math.min(1, 1 - quote.spreadPct / limit));
 }
