@@ -36,9 +36,13 @@ const TS_CLOSE_RETRY_MAX_MS = 5_000;
 /** Faster retries for a moving quote, with bounded backoff for persistent errors. */
 export function closeRetryDelayMs(attempt: number, message = ""): number {
   const error = message.toLowerCase();
-  if (/rate.?limit|too many requests|http 429|\\b429\\b/.test(error)) return 1_500;
-  if (/off quotes|requote|price changed|price moved|quote expired|price deviation|market price changed/.test(error)) return 200;
-  const exponent = Math.max(0, Math.min(5, Math.trunc(attempt) - 1));
+  const exponent = Math.max(0, Math.min(6, Math.trunc(attempt) - 1));
+  if (/rate.?limit|too many requests|http 429|\\b429\\b/.test(error)) {
+    return Math.min(10_000, 1_500 * (2 ** Math.min(exponent, 3)));
+  }
+  if (/off quotes|requote|price changed|price moved|quote expired|price deviation|market price changed/.test(error)) {
+    return Math.min(2_000, 200 * (2 ** Math.min(exponent, 4)));
+  }
   return Math.min(TS_CLOSE_RETRY_MAX_MS, TS_CLOSE_RETRY_BASE_MS * (2 ** exponent));
 }
 
@@ -1382,13 +1386,18 @@ export class RiskExecutor {
     managed.lastError = message;
 
     let snapshotOpen: boolean | undefined;
-    try {
-      this.deps.tools.invalidateSnapshot();
-      const fresh = await this.deps.tools.view(true);
-      snapshotOpen = fresh.positions.some((position) => position.position_id === managed.positionId);
-    } catch {
-      // When reconciliation is unavailable, keep the close request and retry.
-      // An ambiguous timeout must never be assumed to mean the trade is closed.
+    const needsReconciliation = kind === "error" ||
+      indicatesPositionAlreadyClosed(message) ||
+      /timeout|timed out|no transaction_event|no final operation status/i.test(message);
+    if (needsReconciliation) {
+      try {
+        this.deps.tools.invalidateSnapshot();
+        const fresh = await this.deps.tools.view(true);
+        snapshotOpen = fresh.positions.some((position) => position.position_id === managed.positionId);
+      } catch {
+        // When reconciliation is unavailable, keep the close request and retry.
+        // An ambiguous timeout must never be assumed to mean the trade is closed.
+      }
     }
 
     if (snapshotOpen === false) {
