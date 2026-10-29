@@ -156,13 +156,8 @@ export function selectFairShortlist(
     for (const entry of chosen) selected.set(entry.quote.symbol, entry);
   });
 
-  // If a category contains fewer symbols than its quota, reassign the unused
-  // slots to the best remaining quotes rather than returning an undersized list.
-  const fallback = entries.slice().sort((a, b) => b.prelim - a.prelim);
-  for (const entry of fallback) {
-    if (selected.size >= budget) break;
-    selected.set(entry.quote.symbol, entry);
-  }
+  // Do not globally backfill unused category quota: doing so would let FX
+  // re-take the slots reserved for rotating metal/crypto/energy symbols.
   return [...selected.values()].sort((a, b) => b.prelim - a.prelim).slice(0, budget);
 }
 
