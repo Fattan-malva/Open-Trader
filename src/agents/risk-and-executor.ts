@@ -29,7 +29,22 @@ import {
   type PositionSide,
 } from "./trailing.js";
 
-const TS_CLOSE_RETRY_MS = 1_500;
+const TS_CLOSE_BUSY_RETRY_MS = 100;
+const TS_CLOSE_RETRY_BASE_MS = 250;
+const TS_CLOSE_RETRY_MAX_MS = 5_000;
+
+/** Faster retries for a moving quote, with bounded backoff for persistent errors. */
+export function closeRetryDelayMs(attempt: number, message = ""): number {
+  const error = message.toLowerCase();
+  if (/rate.?limit|too many requests|http 429|\\b429\\b/.test(error)) return 1_500;
+  if (/off quotes|requote|price changed|price moved|quote expired|price deviation|market price changed/.test(error)) return 200;
+  const exponent = Math.max(0, Math.min(5, Math.trunc(attempt) - 1));
+  return Math.min(TS_CLOSE_RETRY_MAX_MS, TS_CLOSE_RETRY_BASE_MS * (2 ** exponent));
+}
+
+export function indicatesPositionAlreadyClosed(message: string): boolean {
+  return /position.{0,30}(not found|does not exist|doesn't exist|already closed|is closed|not open)|already.{0,20}closed|no such position/i.test(message);
+}
 
 export interface ManagedPosition {
   positionId: string;
@@ -67,6 +82,8 @@ export interface ManagedPosition {
   closeRequested?: string;
   /** Prevent repeated market-close requests on every tick after a broker error. */
   closeRetryAt?: number;
+  /** Consecutive confirmed close failures; drives bounded retry backoff. */
+  closeAttempts?: number;
   /** Consecutive manage ticks where the broker snapshot did not show the position. */
   misses?: number;
   score: number;
@@ -353,6 +370,7 @@ export class RiskExecutor {
         closing: false,
         closeRequested: typeof position.closeRequested === "string" ? position.closeRequested : undefined,
         closeRetryAt: Number(position.closeRetryAt) > 0 ? Number(position.closeRetryAt) : undefined,
+        closeAttempts: Number(position.closeAttempts) > 0 ? Math.trunc(Number(position.closeAttempts)) : 0,
       });
     }
   }
