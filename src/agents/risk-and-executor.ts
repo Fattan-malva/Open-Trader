@@ -1142,7 +1142,7 @@ export class RiskExecutor {
     if (this.tradeLog.length > 200) this.tradeLog.splice(0, this.tradeLog.length - 200);
     const line = `${entry.action.padEnd(9)} ${entry.symbol ?? ""} ${entry.side ?? ""} ${
       entry.volume ? `${entry.volume} lot ` : ""
-    }${entry.sl ? `sl ${entry.sl} ` : ""}${entry.reason ?? ""}`.replace(/\s+/g, " ").trim();
+    }${entry.price ? `@ ${entry.price} ` : ""}${entry.sl ? `sl ${entry.sl} ` : ""}${entry.action === "open" && entry.positionId ? `#${entry.positionId} ` : ""}${entry.reason ?? ""}`.replace(/\s+/g, " ").trim();
     this.deps.log(line);
     const tone: AgentTone =
       entry.ok === false || entry.action === "error"
