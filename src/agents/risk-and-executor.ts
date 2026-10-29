@@ -630,7 +630,7 @@ export class RiskExecutor {
       sl: managed.emergencySl,
       riskUsd: managed.riskUsd,
       reason:
-        `${signal.setupType} score ${signal.score.toFixed(1)} · risk ${Number(managed.riskUsd ?? 0).toFixed(2)} USD · emergency ${(Math.abs(entry - emergencySl) / pip).toFixed(1)}p · ` +
+        `${signal.setupType} · risk ${Number(managed.riskUsd ?? 0).toFixed(2)} USD · emergency ${(Math.abs(entry - emergencySl) / pip).toFixed(1)}p · ` +
         `trail ${(trailDistance / pip).toFixed(1)}p · score ${signal.score.toFixed(1)}`,
       ok: true,
     });
