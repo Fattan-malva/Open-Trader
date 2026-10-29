@@ -981,7 +981,7 @@ export class RiskExecutor {
       positionId: managed.positionId,
       side: managed.side,
       sl: rounded,
-      reason: `${why} · trail ${(managed.trailDistance / managed.pip).toFixed(1)}p`,
+      reason: `${why} → ${managed.trailStop.toFixed(managed.digits)} · ${(managed.trailDistance / managed.pip).toFixed(1)}p`,
       ok: true,
     });
   }
