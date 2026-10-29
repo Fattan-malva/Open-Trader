@@ -4,7 +4,7 @@ import { isTimeframe, type Timeframe } from "../market/timeframes.js";
  * Deterministic agent settings. Every number is an explicit rule that can be
  * reviewed, backtested and tuned; nothing is learned at runtime.
  *
- * Flow: M1 close -> Screener (M15 trend + pullback/breakout) -> M1 confirmation
+ * Flow: fast scan -> Screener (M5 trend + pullback/breakout) -> M1 confirmation
  * -> live quote/spread recheck -> risk sizing + broker emergency SL -> TS VIRT.
  */
 export interface AgentConfig {
