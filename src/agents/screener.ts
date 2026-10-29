@@ -14,14 +14,23 @@ import { timeframeMs, type Timeframe } from "../market/timeframes.js";
 import type { Tools } from "../tools/index.js";
 import type { TickHub } from "../runtime/hubs.js";
 import type { AgentConfig } from "./config.js";
-import { spreadLabel, spreadPips, spreadQuality, spreadWithinLimit } from "./spread.js";
+import {
+  assessSpread,
+  observeSpread,
+  spreadLabel,
+  spreadPips,
+  spreadQuality,
+  spreadWithinLimit,
+} from "./spread.js";
 import { trailDistanceFromAtr } from "./trailing.js";
 
 export type Direction = "buy" | "sell";
+export type SetupType = "pullback" | "breakout";
 
 export interface Candidate {
   symbol: string;
   direction: Direction;
+  setupType: SetupType;
   score: number;
   price: number;
   spreadPct: number;
@@ -56,6 +65,7 @@ export interface ScreenerOptions {
   minScore: number;
   maxSpreadPips: number;
   maxSpreadPct: number;
+  maxSpreadSpikeRatio: number;
   maxSpreadTrailRatio: number;
   minAtrPct: number;
   maxAtrPct: number;
@@ -63,6 +73,10 @@ export interface ScreenerOptions {
   minTrendAtr: number;
   rsiMin: number;
   rsiMax: number;
+  breakoutLookback: number;
+  breakoutMinBodyAtr: number;
+  breakoutRsiFloor: number;
+  breakoutRsiCeiling: number;
   maxQuoteAgeMs: number;
   trailAtrFactor: number;
   trailMinPips: number;
@@ -77,9 +91,8 @@ const MOMENTUM_WINDOW_MS = 15 * 60_000;
 const SAMPLE_INTERVAL_MS = 1_000;
 
 /**
- * Tick-only momentum memory. It is used only to rank the prefilter shortlist
- * (which pairs are active enough to be worth two candle requests); it is not a
- * hard screener criterion.
+ * Tick-only momentum memory. It is used to rank the shortlist (which symbols
+ * are active enough to justify candle requests), not as a standalone trade signal.
  */
 export class MomentumTracker {
   private readonly samples = new Map<string, MomentumSample[]>();
@@ -131,13 +144,12 @@ export interface CandleScoreInput {
 }
 
 /**
- * Pure candle scoring:
+ * Score two setup families under the same higher-timeframe bias:
+ * - pullback: price is near the screener EMA50 with an RSI that is not extreme;
+ * - breakout: a closed candle breaks the prior range with a directional body.
  *
- *   1. trend EMA50 above/below EMA200 -> trend direction
- *   2. screener RSI in the middle band and price near screener EMA50
- *   3. spread below the limit and cheap relative to the virtual trail
- *
- * No take-profit and no momentum hard gate.
+ * The score ranks valid setup quality. Hard spread, volatility, trend and
+ * execution-risk gates remain in force for both families.
  */
 export function scoreCandidate(input: CandleScoreInput): Candidate | null {
   const { symbol, screener, trend, quote, options } = input;
@@ -152,9 +164,7 @@ export function scoreCandidate(input: CandleScoreInput): Candidate | null {
     trendEma200 === undefined ||
     trendAtrValue === undefined ||
     trendAtrValue <= 0
-  ) {
-    return null;
-  }
+  ) return null;
 
   const trendSeparation = (trendEma50 - trendEma200) / trendAtrValue;
   if (Math.abs(trendSeparation) < options.minTrendAtr) return null;
@@ -166,57 +176,111 @@ export function scoreCandidate(input: CandleScoreInput): Candidate | null {
   const screenerEma50 = lastFinite(ema(screenerCloses, 50));
   const screenerAtr = lastFinite(atr(screener, 14));
   const screenerRsi = lastFinite(rsi(screenerCloses, 14));
+  const last = screener[screener.length - 1];
   const close = screenerCloses[screenerCloses.length - 1];
   if (
     screenerEma50 === undefined ||
     screenerAtr === undefined ||
     screenerAtr <= 0 ||
     screenerRsi === undefined ||
-    close === undefined
-  ) {
-    return null;
-  }
-
-  // Pullback zone: RSI in the middle of its range, price near EMA50.
-  if (screenerRsi < options.rsiMin || screenerRsi > options.rsiMax) return null;
-  const distanceAtr = (close - screenerEma50) / screenerAtr;
-  if (Math.abs(distanceAtr) > options.pullbackDistanceAtr) return null;
+    close === undefined ||
+    !last
+  ) return null;
 
   const atrPct = atrPercent(screener, screenerAtr);
   if (atrPct < options.minAtrPct || atrPct > options.maxAtrPct) return null;
-  if (!spreadWithinLimit(symbol, quote, options)) return null;
+  const spread = assessSpread(symbol, quote, options);
+  if (!spread.ok) return null;
 
-  // Spread is a real cost, not just a screen: rejecting an edge that is mostly
-  // eaten by the spread is what keeps a more aggressive scan profitable.
   const trailDistance = trailDistanceFromAtr(
     screenerAtr,
     options.trailAtrFactor,
     options.trailMinPips * pipSize(symbol),
   );
-  const spreadRatio = trailDistance > 0 ? quote.spread / trailDistance : Number.POSITIVE_INFINITY;
+  const spreadRatio = trailDistance > 0
+    ? quote.spread / trailDistance
+    : Number.POSITIVE_INFINITY;
   if (!Number.isFinite(spreadRatio) || spreadRatio > options.maxSpreadTrailRatio) return null;
 
-  const trendScore = clamp(trendAtr / 1.2, 0, 1) * 40;
-  const pullbackScore =
-    clamp(1 - Math.abs(distanceAtr) / Math.max(options.pullbackDistanceAtr, 1e-9), 0, 1) * 25;
-  const rsiScore = clamp(1 - Math.abs(screenerRsi - 50) / 10, 0, 1) * 20;
-  const spreadScore = spreadQuality(symbol, quote, options) * 15;
-  const score = trendScore + pullbackScore + rsiScore + spreadScore;
-  if (score < options.minScore) return null;
+  const distanceAtr = (close - screenerEma50) / screenerAtr;
+  const pullbackOk =
+    screenerRsi >= options.rsiMin &&
+    screenerRsi <= options.rsiMax &&
+    Math.abs(distanceAtr) <= options.pullbackDistanceAtr;
+
+  const lookback = Math.max(3, Math.trunc(options.breakoutLookback));
+  const prior = screener.slice(-(lookback + 1), -1);
+  const bodyAtr = Math.abs(last.close - last.open) / screenerAtr;
+  const priorHigh = prior.length > 0 ? Math.max(...prior.map((candle) => candle.high)) : Number.NaN;
+  const priorLow = prior.length > 0 ? Math.min(...prior.map((candle) => candle.low)) : Number.NaN;
+  const breakoutRsiOk = direction === "buy"
+    ? screenerRsi <= options.breakoutRsiCeiling
+    : screenerRsi >= options.breakoutRsiFloor;
+  const breakoutOk = prior.length >= lookback &&
+    bodyAtr >= options.breakoutMinBodyAtr &&
+    breakoutRsiOk &&
+    (direction === "buy"
+      ? last.close > last.open && last.close > priorHigh
+      : last.close < last.open && last.close < priorLow);
+
+  if (!pullbackOk && !breakoutOk) return null;
+
+  const trendScore = clamp(trendAtr / 1.2, 0, 1) * 30;
+  const spreadScore = spreadQuality(symbol, quote, options) * 20;
+  const neutralRsiScore = clamp(1 - Math.abs(screenerRsi - 50) / 25, 0, 1) * 15;
+  const pullbackScore = clamp(
+    1 - Math.abs(distanceAtr) / Math.max(options.pullbackDistanceAtr, 1e-9),
+    0,
+    1,
+  ) * 30;
+
+  const breakoutMomentumScore = direction === "buy"
+    ? clamp((screenerRsi - 45) / 30, 0, 1) * 15
+    : clamp((55 - screenerRsi) / 30, 0, 1) * 15;
+  const breakoutStructureScore = 30 + clamp(bodyAtr, 0, 1) * 5;
+
+  const possible: Array<{ setupType: SetupType; score: number; reasons: string[] }> = [];
+  if (pullbackOk) {
+    possible.push({
+      setupType: "pullback",
+      score: trendScore + pullbackScore + neutralRsiScore + spreadScore,
+      reasons: [
+        \`pullback \${distanceAtr.toFixed(2)}×ATR from EMA50\`,
+        \`RSI \${screenerRsi.toFixed(0)}\`,
+      ],
+    });
+  }
+  if (breakoutOk) {
+    possible.push({
+      setupType: "breakout",
+      score: trendScore + breakoutStructureScore + breakoutMomentumScore + spreadScore,
+      reasons: [
+        \`breakout \${lookback}-bar range\`,
+        \`body \${bodyAtr.toFixed(2)}×ATR\`,
+        \`RSI momentum \${screenerRsi.toFixed(0)}\`,
+      ],
+    });
+  }
+  possible.sort((a, b) => b.score - a.score);
+  const best = possible[0];
+  if (!best || best.score < options.minScore) return null;
 
   const reasons = [
-    `${options.trendTimeframe} ${direction === "buy" ? "uptrend" : "downtrend"} ${trendAtr.toFixed(2)}×ATR`,
-    `pullback ${distanceAtr.toFixed(2)}×ATR`,
-    `RSI ${screenerRsi.toFixed(0)}`,
-    `spread ${spreadLabel(symbol, quote)}`,
-    `ATR ${atrPct.toFixed(3)}%`,
-    `cost ${(spreadRatio * 100).toFixed(0)}% trail`,
+    \`\${options.trendTimeframe} \${direction === "buy" ? "uptrend" : "downtrend"} \${trendAtr.toFixed(2)}×ATR\`,
+    ...best.reasons,
+    \`spread \${spreadLabel(symbol, quote)}\`,
+    \`ATR \${atrPct.toFixed(3)}%\`,
+    \`cost \${(spreadRatio * 100).toFixed(0)}% trail\`,
+    ...(spread.baseline !== undefined && spread.spikeRatio !== undefined
+      ? [\`spread \${spread.spikeRatio.toFixed(1)}× symbol median\`]
+      : []),
   ];
 
   return {
     symbol,
     direction,
-    score,
+    setupType: best.setupType,
+    score: best.score,
     price: close,
     spreadPct: quote.spreadPct,
     spreadPips: spreadPips(symbol, quote),
@@ -244,6 +308,8 @@ export interface ScanDiagnostics {
   candleFails: number;
   scored: number;
   passed: number;
+  spreadRejected: number;
+  spreadSpikeRejected: number;
   /** Highest prefilter scores, useful to see why a pair reached the shortlist. */
   top: Array<{ symbol: string; prelim: number; spreadPips: number; mom5: number | null }>;
 }
@@ -252,7 +318,6 @@ export class Screener {
   readonly momentum = new MomentumTracker();
   lastScanAt = 0;
   lastScanDurationMs = 0;
-  /** M15 candles only change once per trend candle; reuse them across scans. */
   private readonly trendCache = new Map<
     string,
     { boundary: number; candles: NormalizedCandle[] }
@@ -266,6 +331,8 @@ export class Screener {
     candleFails: 0,
     scored: 0,
     passed: 0,
+    spreadRejected: 0,
+    spreadSpikeRejected: 0,
     top: [],
   };
 
@@ -277,6 +344,7 @@ export class Screener {
 
   observe(quote: Quote): void {
     this.momentum.observe(quote);
+    observeSpread(quote);
   }
 
   private async trendCandles(
@@ -309,6 +377,8 @@ export class Screener {
     const pre: Pre[] = [];
     let withQuote = 0;
     let fresh = 0;
+    let spreadRejected = 0;
+    let spreadSpikeRejected = 0;
 
     for (const symbol of universe) {
       const quote = this.ticks.get(symbol);
@@ -316,13 +386,20 @@ export class Screener {
       withQuote += 1;
       if (now - quote.timestamp > this.options.maxQuoteAgeMs) continue;
       fresh += 1;
-      if (!spreadWithinLimit(symbol, quote, this.options)) continue;
+      const spread = assessSpread(symbol, quote, this.options);
+      if (!spread.ok) {
+        spreadRejected += 1;
+        if (spread.reason?.startsWith("spread spike")) spreadSpikeRejected += 1;
+        continue;
+      }
 
       const mom5 = this.momentum.changePct(symbol, 5);
       const activity = clamp(quote.ticks / 20, 0, 1);
       const move = mom5 === null ? 0.35 : clamp(Math.abs(mom5) / 0.08, 0, 1);
+      // Rank active and moving symbols without allowing spread quality to
+      // dominate the shortlist before technical setup scoring.
       const prelim =
-        spreadQuality(symbol, quote, this.options) * 60 + activity * 20 + move * 20;
+        spreadQuality(symbol, quote, this.options) * 35 + activity * 25 + move * 40;
       pre.push({ quote, mom5, prelim });
     }
 
@@ -382,6 +459,8 @@ export class Screener {
       candleFails,
       scored,
       passed: capped.length,
+      spreadRejected,
+      spreadSpikeRejected,
       top: shortlist.slice(0, 6).map((entry) => ({
         symbol: entry.quote.symbol,
         prelim: Number(entry.prelim.toFixed(1)),
@@ -402,6 +481,7 @@ export function screenerOptionsFrom(config: AgentConfig): ScreenerOptions {
     minScore: config.minScore,
     maxSpreadPips: config.maxSpreadPips,
     maxSpreadPct: config.maxSpreadPct,
+    maxSpreadSpikeRatio: config.maxSpreadSpikeRatio,
     maxSpreadTrailRatio: config.maxSpreadTrailRatio,
     minAtrPct: config.minAtrPct,
     maxAtrPct: config.maxAtrPct,
@@ -409,6 +489,10 @@ export function screenerOptionsFrom(config: AgentConfig): ScreenerOptions {
     minTrendAtr: config.minTrendAtr,
     rsiMin: config.rsiMin,
     rsiMax: config.rsiMax,
+    breakoutLookback: config.breakoutLookback,
+    breakoutMinBodyAtr: config.breakoutMinBodyAtr,
+    breakoutRsiFloor: config.breakoutRsiFloor,
+    breakoutRsiCeiling: config.breakoutRsiCeiling,
     maxQuoteAgeMs: config.maxQuoteAgeMs,
     trailAtrFactor: config.trailAtrFactor,
     trailMinPips: config.trailMinPips,
