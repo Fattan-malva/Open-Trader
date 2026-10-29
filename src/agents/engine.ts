@@ -111,6 +111,7 @@ export class AgentEngine {
   private running = false;
   private stopped = false;
   private scanning = false;
+  private scanRequested = false;
   private managing = false;
   private lastScanAt = 0;
   private lastScanDurationMs = 0;
@@ -162,24 +163,24 @@ export class AgentEngine {
       `agent ${this.deps.live ? "LIVE" : "DRY-RUN"} · ${this.deps.universe.length} pairs · ` +
         `screener ${this.deps.config.screenerTimeframe} · trend ${this.deps.config.trendTimeframe} · ` +
         `confirm ${this.deps.config.confirmTimeframe} · trail ${this.deps.config.trailTimeframe} · ` +
-        `risk ${this.deps.config.riskPct}% of ${this.deps.config.virtualEquity} USD · ` +
-        `no position cap · emergency ${this.deps.config.emergencySlAtrFactor}×ATR · ` +
+        `risk ${this.deps.config.riskPct}% of live account equity · ` +
+        `position cap ${this.deps.config.maxOpenPositions} · aggregate risk ${this.deps.config.maxOpenRiskPct}% · ` +
+        `emergency ${this.deps.config.emergencySlAtrFactor}×M1 ATR · ` +
         `trail ${this.deps.config.trailAtrFactor}×ATR (min ${this.deps.config.trailMinPips}p)`,
     );
     this.writeState();
     this.deps.events.start();
     this.deps.ticks.start(this.deps.universe);
-    for (let i = 0; i < 50 && this.deps.events.state !== "open"; i += 1) {
+    for (let i = 0; i < 15 && this.deps.events.state !== "open"; i += 1) {
       if (this.stopped) return;
       await sleep(100);
     }
-    // The WS subscribes one instrument per message (~20/s). Scanning after the
-    // very first tick would only see a handful of pairs and waste the cycle.
-    // Some instruments are quiet, so wait for a healthy sample, not all of them.
-    const warmTarget = Math.min(this.deps.universe.length, 120);
-    for (let i = 0; i < 160 && this.deps.ticks.quotesCount < warmTarget; i += 1) {
+    // Use a bounded, smaller warm-up. Waiting for 120 quotes could delay the
+    // first scan by 40 seconds even though enough live prices are already available.
+    const warmTarget = Math.min(this.deps.universe.length, 24);
+    for (let i = 0; i < 40 && this.deps.ticks.quotesCount < warmTarget; i += 1) {
       if (this.stopped) return;
-      await sleep(250);
+      await sleep(125);
     }
     if (this.stopped) return;
     this.record(
@@ -294,7 +295,11 @@ export class AgentEngine {
   }
 
   async scanAndEnter(): Promise<void> {
-    if (this.scanning || this.stopped) return;
+    if (this.stopped) return;
+    if (this.scanning) {
+      this.scanRequested = true;
+      return;
+    }
     this.scanning = true;
     const started = Date.now();
     try {
@@ -424,6 +429,10 @@ export class AgentEngine {
       );
     } finally {
       this.scanning = false;
+      if (this.scanRequested && !this.stopped) {
+        this.scanRequested = false;
+        queueMicrotask(() => void this.scanAndEnter());
+      }
     }
   }
 
