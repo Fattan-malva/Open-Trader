@@ -45,13 +45,28 @@ export interface AgentConfig {
   rsiMin: number;
   rsiMax: number;
 
-  /** risk capital used for sizing (demo balance is too large to size from) */
+  /** Legacy compatibility setting; live risk sizing reads the account snapshot. */
+  /** Dynamic account-wide exposure limits. */
+  maxOpenPositions: number;
+  maxOpenRiskPct: number;
+  maxDailyLossPct: number;
+  /** Fraction of free margin that must remain unused. */
+  marginReservePct: number;
+
   virtualEquity: number;
   riskPct: number;
   maxLotsPerTrade: number;
   marginBuffer: number;
 
-  /** broker-side emergency stop: 3 × trend-timeframe ATR */
+  /** Activate profit-lock trailing at this estimated gross USD profit. */
+  trailProfitActivationUsd: number;
+  /** Minimum gross USD profit to lock after activation. */
+  trailProfitLockUsd: number;
+  /** Rate-limit broker-side stop improvements. */
+  brokerStopUpdateMs: number;
+  brokerStopMoveMinPips: number;
+
+  /** broker-side emergency stop: fast ATR multiple plus broker/spread floors */
   emergencySlAtrFactor: number;
   /** never place an emergency stop closer than this to the market */
   minStopPips: number;
@@ -98,8 +113,8 @@ export function loadAgentConfig(
 
     // Rank a wide shortlist, then let the rules and the spread-cost guard
     // reject weak setups. M1 needs a wider net than M15 to find pullbacks.
-    shortlistSize: Math.max(1, Math.trunc(num(env, "AGENT_SHORTLIST", 40))),
-    maxCandidates: Math.max(1, Math.trunc(num(env, "AGENT_MAX_CANDIDATES", 40))),
+    shortlistSize: Math.max(1, Math.trunc(num(env, "AGENT_SHORTLIST", 16))),
+    maxCandidates: Math.max(1, Math.trunc(num(env, "AGENT_MAX_CANDIDATES", 16))),
     minScore: num(env, "AGENT_MIN_SCORE", 16),
 
     maxSpreadPips: num(env, "AGENT_MAX_SPREAD_PIPS", 5),
@@ -112,16 +127,25 @@ export function loadAgentConfig(
     rsiMin: num(env, "AGENT_RSI_MIN", 30),
     rsiMax: num(env, "AGENT_RSI_MAX", 70),
 
+    // Compatibility setting only: live sizing uses actual account balance/equity.
     virtualEquity: num(env, "EXNESS_VIRTUAL_EQUITY", 10_000),
-    riskPct: num(env, "AGENT_RISK_PCT", 1),
+    riskPct: Math.max(0.01, num(env, "AGENT_RISK_PCT", 0.5)),
     maxLotsPerTrade: num(env, "AGENT_MAX_LOTS", 0.5),
-    marginBuffer: 3,
+    marginBuffer: Math.max(1, num(env, "AGENT_MARGIN_BUFFER", 3)),
+    maxOpenPositions: Math.max(1, Math.trunc(num(env, "AGENT_MAX_OPEN_POSITIONS", 3))),
+    maxOpenRiskPct: Math.max(0.1, num(env, "AGENT_MAX_OPEN_RISK_PCT", 2)),
+    maxDailyLossPct: Math.max(0, num(env, "AGENT_MAX_DAILY_LOSS_PCT", 3)),
+    marginReservePct: Math.min(90, Math.max(0, num(env, "AGENT_MARGIN_RESERVE_PCT", 25))),
 
-    emergencySlAtrFactor: num(env, "AGENT_EMERGENCY_SL_ATR", 2.5),
-    minStopPips: num(env, "AGENT_MIN_STOP_PIPS", 8),
-    trailAtrFactor: num(env, "AGENT_TRAIL_ATR", 1.6),
+    emergencySlAtrFactor: num(env, "AGENT_EMERGENCY_SL_ATR", 1.5),
+    minStopPips: num(env, "AGENT_MIN_STOP_PIPS", 6),
+    trailAtrFactor: num(env, "AGENT_TRAIL_ATR", 1.2),
     trailAtrPeriod: Math.max(2, Math.trunc(num(env, "AGENT_TRAIL_ATR_PERIOD", 14))),
-    trailMinPips: num(env, "AGENT_TRAIL_MIN_PIPS", 6),
+    trailMinPips: num(env, "AGENT_TRAIL_MIN_PIPS", 4),
+    trailProfitActivationUsd: Math.max(0, num(env, "AGENT_TRAIL_PROFIT_ACTIVATION_USD", 0.30)),
+    trailProfitLockUsd: Math.max(0, num(env, "AGENT_TRAIL_PROFIT_LOCK_USD", 0.10)),
+    brokerStopUpdateMs: Math.max(1000, num(env, "AGENT_BROKER_STOP_UPDATE_MS", 10000)),
+    brokerStopMoveMinPips: Math.max(0.1, num(env, "AGENT_BROKER_STOP_MOVE_MIN_PIPS", 2)),
     stopEnsureRetryMs: num(env, "AGENT_STOP_RETRY_MS", 15000),
 
     maxQuoteAgeMs: num(env, "AGENT_MAX_QUOTE_AGE_MS", 8000),

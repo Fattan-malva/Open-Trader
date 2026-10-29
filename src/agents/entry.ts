@@ -27,7 +27,7 @@ export interface EntrySignal {
   side: Direction;
   /** live reference price at decision time */
   entry: number;
-  /** distant broker-side stop, sized from trend-timeframe ATR */
+  /** Broker emergency stop, based on fast ATR and the broker/spread minimums. */
   emergencySl: number;
   digits: number;
   pip: number;
@@ -53,8 +53,8 @@ export interface EntryDecision {
  * The screener has already checked the trend EMA50/EMA200, screener RSI,
  * distance to screener EMA50, ATR range and spread. Entry has one job: require
  * the last closed confirmation candle to agree with the trend direction, then
- * derive the broker emergency stop from the higher-timeframe ATR and the
- * virtual trail from the faster ATR. There is deliberately no take-profit.
+ * derive the broker emergency stop from fast ATR and broker/spread minimums.
+ * There is deliberately no take-profit.
  */
 export function decideEntry(input: {
   candidate: Candidate;
@@ -133,14 +133,11 @@ export function decideEntry(input: {
 
   const entry = roundPrice(side === "buy" ? quote.ask : quote.bid, digits);
 
-  // The broker stop is intentionally far away: it is the "program died" layer.
-  // Trend-timeframe ATR keeps it wider than the fast virtual trail.
-  const stopAtr =
-    Number.isFinite(candidate.trendAtrValue) && candidate.trendAtrValue > 0
-      ? candidate.trendAtrValue
-      : atrValue;
+  // Keep the broker emergency stop closer to entry by using the fast
+  // screener ATR, not the much larger trend-timeframe ATR. Broker minimum
+  // distance and spread remain hard floors, and sizing uses this actual stop.
   const emergencyDistance = Math.max(
-    config.emergencySlAtrFactor * stopAtr,
+    config.emergencySlAtrFactor * atrValue,
     config.minStopPips * pip,
     quote.spread * 3,
   );
