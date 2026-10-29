@@ -792,7 +792,8 @@ export class RiskExecutor {
         await this.refreshTrailDistance(managed);
       }
 
-      await this.ensureProfitValuation(managed);
+      // Valuation may need a conversion quote; never block stop-hit checks on that I/O.
+      void this.ensureProfitValuation(managed);
       const closePrice = managed.side === "buy" ? quote.bid : quote.ask;
       const favorableMove = managed.side === "buy"
         ? closePrice - managed.entry
