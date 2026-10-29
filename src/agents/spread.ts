@@ -98,7 +98,7 @@ export function assessSpread(
       ok: false,
       reason: fx
         ? `spread ${value.toFixed(2)}p exceeds ${hardLimit}p cap`
-        : `spread ${(value * 100).toFixed(3)}% exceeds ${hardLimit}% cap`,
+        : `spread ${value.toFixed(3)}% exceeds ${hardLimit}% cap`,
       value,
       unit,
     };
