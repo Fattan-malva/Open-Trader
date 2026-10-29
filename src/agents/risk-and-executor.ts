@@ -574,7 +574,8 @@ export class RiskExecutor {
       atr: signal.atr,
       trailActivated: false,
       profitPerPriceUnitUsd: contractSize * quoteRate * (Number(position.volume) > 0 ? Number(position.volume) : finalLots),
-      riskUsd: (Number(position.volume) > 0 ? Number(position.volume) : finalLots) * sizingSlPips * pipValuePerLot,
+      riskUsd: (Number(position.volume) > 0 ? Number(position.volume) : finalLots) *
+        (Math.abs(entry - emergencySl) / pip) * pipValuePerLot,
       lastBrokerStopMoveAt: 0,
       lastValuationAttemptAt: 0,
       openedAt: Date.now(),
