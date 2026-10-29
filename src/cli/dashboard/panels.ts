@@ -329,6 +329,7 @@ export function renderPositionsTable(
         style.bold(pos.instrument),
         sideLabel(pos.direction),
         Number(pos.volume).toFixed(2),
+        formatNumber(Number(pos.open_price), digits),
         now !== undefined ? formatNumber(now, digits) : style.dim("—"),
         tsCell,
         slCell,
@@ -340,6 +341,7 @@ export function renderPositionsTable(
         style.bold(pos.instrument),
         sideLabel(pos.direction),
         Number(pos.volume).toFixed(2),
+        formatNumber(Number(pos.open_price), digits),
         now !== undefined ? formatNumber(now, digits) : style.dim("—"),
         tsCell,
         pnlCell,
@@ -358,9 +360,9 @@ export function renderPositionsTable(
   });
 
   const headers = wide
-    ? ["SYMBOL", "SIDE", "LOT", "NOW", "TS VIRT", "SL", "PNL $"]
+    ? ["SYMBOL", "SIDE", "LOT", "ENTRY", "NOW", "TS VIRT", "SL", "PNL $"]
     : mid
-      ? ["SYMBOL", "SIDE", "LOT", "NOW", "TS VIRT", "PNL $"]
+      ? ["SYMBOL", "SIDE", "LOT", "ENTRY", "NOW", "TS VIRT", "PNL $"]
       : slim
         ? ["SYMBOL", "SIDE", "NOW", "TS VIRT", "PNL $"]
         : ["SYMBOL", "SIDE", "TS VIRT", "PNL $"];
