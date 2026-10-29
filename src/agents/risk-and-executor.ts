@@ -22,7 +22,6 @@ import {
   canMoveTrailStop,
   initialVirtualStop,
   isFreshQuote,
-  profitLockActivationThreshold,
   trailDistanceFromAtr,
   updateBest,
   virtualStopLocksProfit,
