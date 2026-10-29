@@ -4,11 +4,12 @@ import type { Quote } from "../market/store.js";
 import type { Timeframe } from "../market/timeframes.js";
 import type { AgentConfig } from "./config.js";
 import type { Candidate, Direction } from "./screener.js";
-import { spreadWithinLimit } from "./spread.js";
+import { assessSpread, spreadLabel } from "./spread.js";
 
 export interface EntryConfig {
   maxSpreadPips: number;
   maxSpreadPct: number;
+  maxSpreadSpikeRatio: number;
   maxSpreadTrailRatio: number;
   maxQuoteAgeMs: number;
   maxChaseAtr: number;
@@ -18,6 +19,8 @@ export interface EntryConfig {
   trailMinPips: number;
   rsiMin: number;
   rsiMax: number;
+  breakoutRsiFloor: number;
+  breakoutRsiCeiling: number;
   pullbackDistanceAtr: number;
   confirmTimeframe: Timeframe;
 }
@@ -25,9 +28,10 @@ export interface EntryConfig {
 export interface EntrySignal {
   symbol: string;
   side: Direction;
-  /** live reference price at decision time */
+  setupType: Candidate["setupType"];
+  /** live executable-side reference price at decision time */
   entry: number;
-  /** Broker emergency stop, based on fast ATR and the broker/spread minimums. */
+  /** Broker emergency stop, based on fast ATR and broker/spread minimums. */
   emergencySl: number;
   digits: number;
   pip: number;
@@ -48,13 +52,10 @@ export interface EntryDecision {
 }
 
 /**
- * Trend-following pullback entry.
- *
- * The screener has already checked the trend EMA50/EMA200, screener RSI,
- * distance to screener EMA50, ATR range and spread. Entry has one job: require
- * the last closed confirmation candle to agree with the trend direction, then
- * derive the broker emergency stop from fast ATR and broker/spread minimums.
- * There is deliberately no take-profit.
+ * Entry validates the selected setup against a fresh quote and the last closed
+ * confirmation candle. Pullbacks retain RSI/EMA proximity checks; breakouts
+ * are allowed to have momentum RSI readings but cannot enter at extreme
+ * exhaustion or after chasing price too far.
  */
 export function decideEntry(input: {
   candidate: Candidate;
@@ -74,68 +75,72 @@ export function decideEntry(input: {
   const digits = digitsFor(symbol);
   const pip = pipSize(symbol, digits);
 
-  if (!spreadWithinLimit(symbol, quote, config)) {
-    rejects.push("spread too wide");
-  }
-  if (now - quote.timestamp > config.maxQuoteAgeMs) {
-    rejects.push(`quote ${now - quote.timestamp}ms old`);
+  const spread = assessSpread(symbol, quote, config);
+  if (!spread.ok) rejects.push(spread.reason ?? "spread rejected");
+  const quoteAge = now - quote.timestamp;
+  if (quoteAge > config.maxQuoteAgeMs || quoteAge < -1_000) {
+    rejects.push(\`quote \${Math.round(quoteAge)}ms old/future\`);
   }
 
   const confirm = input.confirmCandles ?? candidate.candles;
   const last = confirm[confirm.length - 1];
   if (!last) {
-    return { signal: null, rejects: [`${config.confirmTimeframe} candles not ready`] };
+    return { signal: null, rejects: [...rejects, \`\${config.confirmTimeframe} candles not ready\`] };
   }
 
   const atrValue = candidate.atr;
   if (!Number.isFinite(atrValue) || atrValue <= 0) {
-    return { signal: null, rejects: ["screener ATR not ready"] };
+    return { signal: null, rejects: [...rejects, "screener ATR not ready"] };
   }
 
-  // Virtual trail is the normal exit. It stays tight and never loosens.
   const trailDistance = Math.max(
     config.trailAtrFactor * atrValue,
     config.trailMinPips * pip,
   );
-  const spreadRatio =
-    trailDistance > 0 ? quote.spread / trailDistance : Number.POSITIVE_INFINITY;
-  if (spreadRatio > config.maxSpreadTrailRatio) {
+  const spreadRatio = trailDistance > 0
+    ? quote.spread / trailDistance
+    : Number.POSITIVE_INFINITY;
+  if (!Number.isFinite(spreadRatio) || spreadRatio > config.maxSpreadTrailRatio) {
     rejects.push(
-      `spread cost ${(spreadRatio * 100).toFixed(0)}% of trail ` +
-        `(max ${(config.maxSpreadTrailRatio * 100).toFixed(0)}%)`,
+      \`spread cost \${(spreadRatio * 100).toFixed(0)}% of trail \` +
+        \`(max \${(config.maxSpreadTrailRatio * 100).toFixed(0)}%)\`,
     );
   }
 
-  // The confirmation candle must have CLOSED in the trend direction.
   const confirmed = side === "buy" ? last.close > last.open : last.close < last.open;
   if (!confirmed) {
     rejects.push(
-      `${config.confirmTimeframe} close not ${side === "buy" ? "bullish" : "bearish"} ` +
-        `(${last.open}→${last.close})`,
+      \`\${config.confirmTimeframe} close not \${side === "buy" ? "bullish" : "bearish"} \` +
+        \`(\${last.open}→\${last.close})\`,
     );
   }
 
-  if (candidate.rsi < config.rsiMin || candidate.rsi > config.rsiMax) {
-    rejects.push(`RSI ${candidate.rsi.toFixed(0)} outside ${config.rsiMin}-${config.rsiMax}`);
-  }
-  if (Math.abs(candidate.distanceAtr) > config.pullbackDistanceAtr) {
-    rejects.push(`price ${candidate.distanceAtr.toFixed(2)}×ATR from EMA50`);
+  if (candidate.setupType === "pullback") {
+    if (candidate.rsi < config.rsiMin || candidate.rsi > config.rsiMax) {
+      rejects.push(\`pullback RSI \${candidate.rsi.toFixed(0)} outside \${config.rsiMin}-\${config.rsiMax}\`);
+    }
+    if (Math.abs(candidate.distanceAtr) > config.pullbackDistanceAtr) {
+      rejects.push(\`pullback price \${candidate.distanceAtr.toFixed(2)}×ATR from EMA50\`);
+    }
+  } else if (
+    (side === "buy" && candidate.rsi > config.breakoutRsiCeiling) ||
+    (side === "sell" && candidate.rsi < config.breakoutRsiFloor)
+  ) {
+    rejects.push(\`breakout momentum exhausted at RSI \${candidate.rsi.toFixed(0)}\`);
   }
 
+  // Mid is used for chase-distance so the normal bid/ask spread is not counted
+  // twice; the executable ask/bid is still used for the actual entry price.
   const chaseAtr = Math.abs(quote.mid - last.close) / atrValue;
   if (chaseAtr > config.maxChaseAtr) {
     rejects.push(
-      `chasing ${chaseAtr.toFixed(2)}×ATR from ${config.confirmTimeframe} close`,
+      \`chasing \${chaseAtr.toFixed(2)}×ATR from \${config.confirmTimeframe} close\`,
     );
   }
 
   if (rejects.length > 0) return { signal: null, rejects };
 
   const entry = roundPrice(side === "buy" ? quote.ask : quote.bid, digits);
-
-  // Keep the broker emergency stop closer to entry by using the fast
-  // screener ATR, not the much larger trend-timeframe ATR. Broker minimum
-  // distance and spread remain hard floors, and sizing uses this actual stop.
   const emergencyDistance = Math.max(
     config.emergencySlAtrFactor * atrValue,
     config.minStopPips * pip,
@@ -146,15 +151,18 @@ export function decideEntry(input: {
 
   const reasons = [
     ...candidate.reasons,
-    `${config.confirmTimeframe} ${side === "buy" ? "bullish" : "bearish"} close confirm`,
-    `emergency SL ${slPips.toFixed(1)}p`,
-    `trail ${(trailDistance / pip).toFixed(1)}p`,
+    \`\${candidate.setupType} \${config.confirmTimeframe} \${side === "buy" ? "bullish" : "bearish"} close confirm\`,
+    \`spread \${spreadLabel(symbol, quote)}\`,
+    \`spread/trail \${(spreadRatio * 100).toFixed(0)}%\`,
+    \`emergency SL \${slPips.toFixed(1)}p\`,
+    \`trail \${(trailDistance / pip).toFixed(1)}p\`,
   ];
 
   return {
     signal: {
       symbol,
       side,
+      setupType: candidate.setupType,
       entry,
       emergencySl,
       digits,
@@ -186,6 +194,7 @@ export function entryConfigFrom(config: AgentConfig): EntryConfig {
   return {
     maxSpreadPips: config.maxSpreadPips,
     maxSpreadPct: config.maxSpreadPct,
+    maxSpreadSpikeRatio: config.maxSpreadSpikeRatio,
     maxSpreadTrailRatio: config.maxSpreadTrailRatio,
     maxQuoteAgeMs: config.maxQuoteAgeMs,
     maxChaseAtr: config.maxChaseAtr,
@@ -195,6 +204,8 @@ export function entryConfigFrom(config: AgentConfig): EntryConfig {
     trailMinPips: config.trailMinPips,
     rsiMin: config.rsiMin,
     rsiMax: config.rsiMax,
+    breakoutRsiFloor: config.breakoutRsiFloor,
+    breakoutRsiCeiling: config.breakoutRsiCeiling,
     pullbackDistanceAtr: config.pullbackDistanceAtr,
     confirmTimeframe: config.confirmTimeframe,
   };
