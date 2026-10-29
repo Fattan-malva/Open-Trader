@@ -83,6 +83,20 @@ export function virtualStopLocksProfit(
 }
 
 /**
+ * Before the first profit-locking move, do not publish an intermediate trail
+ * update that still leaves the stop on the loss side of entry. Once locked,
+ * the ordinary monotonic ratchet may tighten the stop further.
+ */
+export function canMoveTrailStop(
+  side: PositionSide,
+  nextStop: number,
+  entry: number,
+  alreadyLocked: boolean,
+): boolean {
+  return alreadyLocked || virtualStopLocksProfit(side, nextStop, entry);
+}
+
+/**
  * Close when the market trades through the virtual stop
  */
 export function virtualStopHit(
