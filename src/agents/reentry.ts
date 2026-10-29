@@ -28,7 +28,8 @@ export function shouldOpenReentry(input: ReentryTriggerInput): boolean {
   if (!previous) return true;
   if (!Number.isFinite(price) || price <= 0) return false;
 
-  if (candleTime && candleTime !== previous.candleTime) return true;
+  // A blank legacy watermark has no reliable candle identity; require price progress.
+  if (candleTime && previous.candleTime && candleTime !== previous.candleTime) return true;
 
   const step = Math.max(atr * stepAtr, minimumStep);
   if (!Number.isFinite(step) || step <= 0) return false;
