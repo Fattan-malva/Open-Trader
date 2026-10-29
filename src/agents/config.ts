@@ -4,53 +4,46 @@ import { isTimeframe, type Timeframe } from "../market/timeframes.js";
  * Deterministic agent settings. Every number is an explicit rule that can be
  * reviewed, backtested and tuned; nothing is learned at runtime.
  *
- * Flow: M1 close -> screener (M15 trend + M1 pullback) -> M1 confirmation
- * -> risk (1% sizing, broker emergency SL) -> program-side virtual trail.
+ * Flow: M1 close -> Screener (M15 trend + pullback/breakout) -> M1 confirmation
+ * -> live quote/spread recheck -> risk sizing + broker emergency SL -> TS VIRT.
  */
 export interface AgentConfig {
-  /** fallback cadence when alignment is disabled */
   scanIntervalMs: number;
-  /** align each scan to the close of the screener timeframe */
   alignScanToCandle: boolean;
-  /** how often open positions are managed (virtual trailing stop) */
   manageIntervalMs: number;
 
-  /** candles used for the pullback, confirmation and trailing ATR */
   screenerTimeframe: Timeframe;
-  /** higher timeframe used for the EMA50/EMA200 trend filter */
   trendTimeframe: Timeframe;
-  /** candles used to confirm an entry */
   confirmTimeframe: Timeframe;
-  /** candles used to refresh the trailing ATR */
   trailTimeframe: Timeframe;
 
   shortlistSize: number;
   maxCandidates: number;
   minScore: number;
 
-  /**
-   * FX spread limit in pips. Non-FX instruments use maxSpreadPct instead,
-   * because a "pip" is not meaningful for crypto/indices/stocks.
-   */
+  /** FX spread limit in pips. Other instruments use spread percent. */
   maxSpreadPips: number;
   maxSpreadPct: number;
-  /** reject when spread costs more than this fraction of the trail distance */
+  /** Reject when the current spread is this many times above its rolling median. */
+  maxSpreadSpikeRatio: number;
+  /** Reject when spread costs more than this fraction of the virtual trail distance. */
   maxSpreadTrailRatio: number;
   minAtrPct: number;
   maxAtrPct: number;
-  /** price must sit within this many screener ATRs of EMA50 */
+  /** Pullback candidates must sit within this many screener ATRs of EMA50. */
   pullbackDistanceAtr: number;
-  /** minimum trend EMA50/EMA200 separation, measured in trend ATRs */
+  /** Minimum trend EMA50/EMA200 separation, measured in trend ATRs. */
   minTrendAtr: number;
   rsiMin: number;
   rsiMax: number;
+  breakoutLookback: number;
+  breakoutMinBodyAtr: number;
+  breakoutRsiFloor: number;
+  breakoutRsiCeiling: number;
 
-  /** Legacy compatibility setting; live risk sizing reads the account snapshot. */
-  /** Dynamic account-wide exposure limits. */
   maxOpenPositions: number;
   maxOpenRiskPct: number;
   maxDailyLossPct: number;
-  /** Fraction of free margin that must remain unused. */
   marginReservePct: number;
 
   virtualEquity: number;
@@ -58,19 +51,14 @@ export interface AgentConfig {
   maxLotsPerTrade: number;
   marginBuffer: number;
 
-  /** Rate-limit broker-side stop improvements. */
   brokerStopUpdateMs: number;
   brokerStopMoveMinPips: number;
 
-  /** broker-side emergency stop: fast ATR multiple plus broker/spread floors */
   emergencySlAtrFactor: number;
-  /** never place an emergency stop closer than this to the market */
   minStopPips: number;
-  /** virtual trail: max(screener ATR × factor, minimum pips) */
   trailAtrFactor: number;
   trailAtrPeriod: number;
   trailMinPips: number;
-  /** retry creating the emergency SLTP order while it is missing */
   stopEnsureRetryMs: number;
 
   maxQuoteAgeMs: number;
@@ -107,23 +95,27 @@ export function loadAgentConfig(
     confirmTimeframe: timeframe(env, "AGENT_CONFIRM_TF", "M1"),
     trailTimeframe: timeframe(env, "AGENT_TRAIL_TF", "M1"),
 
-    // Rank a wide shortlist, then let the rules and the spread-cost guard
-    // reject weak setups. M1 needs a wider net than M15 to find pullbacks.
-    shortlistSize: Math.max(1, Math.trunc(num(env, "AGENT_SHORTLIST", 16))),
+    // Wider ranking net plus a lower, but still positive, score gate finds more
+    // opportunities without raising risk or bypassing hard execution filters.
+    shortlistSize: Math.max(1, Math.trunc(num(env, "AGENT_SHORTLIST", 20))),
     maxCandidates: Math.max(1, Math.trunc(num(env, "AGENT_MAX_CANDIDATES", 16))),
     minScore: num(env, "AGENT_MIN_SCORE", 16),
 
     maxSpreadPips: num(env, "AGENT_MAX_SPREAD_PIPS", 5),
     maxSpreadPct: num(env, "AGENT_MAX_SPREAD_PCT", 0.08),
+    maxSpreadSpikeRatio: Math.max(1.1, num(env, "AGENT_MAX_SPREAD_SPIKE_RATIO", 2.5)),
     maxSpreadTrailRatio: num(env, "AGENT_MAX_SPREAD_TRAIL", 0.4),
     minAtrPct: num(env, "AGENT_MIN_ATR_PCT", 0.0025),
     maxAtrPct: num(env, "AGENT_MAX_ATR_PCT", 1.8),
-    pullbackDistanceAtr: num(env, "AGENT_PULLBACK_ATR", 1.8),
-    minTrendAtr: num(env, "AGENT_MIN_TREND_ATR", 0.008),
-    rsiMin: num(env, "AGENT_RSI_MIN", 30),
-    rsiMax: num(env, "AGENT_RSI_MAX", 70),
+    pullbackDistanceAtr: num(env, "AGENT_PULLBACK_ATR", 2.2),
+    minTrendAtr: num(env, "AGENT_MIN_TREND_ATR", 0.006),
+    rsiMin: num(env, "AGENT_RSI_MIN", 27),
+    rsiMax: num(env, "AGENT_RSI_MAX", 73),
+    breakoutLookback: Math.max(3, Math.trunc(num(env, "AGENT_BREAKOUT_LOOKBACK", 10))),
+    breakoutMinBodyAtr: Math.max(0.05, num(env, "AGENT_BREAKOUT_BODY_ATR", 0.15)),
+    breakoutRsiFloor: num(env, "AGENT_BREAKOUT_RSI_FLOOR", 18),
+    breakoutRsiCeiling: num(env, "AGENT_BREAKOUT_RSI_CEILING", 82),
 
-    // Compatibility setting only: live sizing uses actual account balance/equity.
     virtualEquity: num(env, "EXNESS_VIRTUAL_EQUITY", 10_000),
     riskPct: Math.max(0.01, num(env, "AGENT_RISK_PCT", 0.5)),
     maxLotsPerTrade: num(env, "AGENT_MAX_LOTS", 0.5),
@@ -143,7 +135,7 @@ export function loadAgentConfig(
     stopEnsureRetryMs: num(env, "AGENT_STOP_RETRY_MS", 15000),
 
     maxQuoteAgeMs: num(env, "AGENT_MAX_QUOTE_AGE_MS", 8000),
-    maxChaseAtr: num(env, "AGENT_MAX_CHASE_ATR", 2),
+    maxChaseAtr: num(env, "AGENT_MAX_CHASE_ATR", 1.5),
   };
 
   return { ...defaults, ...overrides };
