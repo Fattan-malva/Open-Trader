@@ -20,6 +20,7 @@ import { spreadWithinLimit } from "./spread.js";
 import {
   advanceVirtualStop,
   initialVirtualStop,
+  profitLockActivationThreshold,
   trailDistanceFromAtr,
   updateBest,
   virtualStopHit,
@@ -816,8 +817,9 @@ export class RiskExecutor {
         : managed.entry - closePrice;
       const estimatedProfitUsd = Math.max(0, favorableMove) *
         Math.max(0, managed.profitPerPriceUnitUsd ?? 0);
+      const lockActivationUsd = profitLockActivationThreshold(this.deps.config.trailProfitLockUsd);
       const activatedNow = !managed.trailActivated &&
-        estimatedProfitUsd >= this.deps.config.trailProfitActivationUsd;
+        estimatedProfitUsd >= lockActivationUsd;
       if (activatedNow) {
         managed.trailActivated = true;
         this.log({
@@ -827,7 +829,7 @@ export class RiskExecutor {
           positionId: managed.positionId,
           side: managed.side,
           price: closePrice,
-          reason: `profit-lock activated · gross estimated +${estimatedProfitUsd.toFixed(2)} USD`,
+          reason: `profit-lock activated · gross +${estimatedProfitUsd.toFixed(2)} USD (threshold ${lockActivationUsd.toFixed(2)})`,
           ok: true,
         });
       }
@@ -852,7 +854,8 @@ export class RiskExecutor {
   private async ensureProfitValuation(managed: ManagedPosition): Promise<void> {
     if (Number(managed.profitPerPriceUnitUsd) > 0) return;
     const now = Date.now();
-    if (now - (managed.lastValuationAttemptAt ?? 0) < 60_000) return;
+    // Retry transient valuation/conversion failures quickly; do not leave a restored position unprotected for a full minute.
+    if (now - (managed.lastValuationAttemptAt ?? 0) < 5_000) return;
     managed.lastValuationAttemptAt = now;
     try {
       const conditions = await this.deps.tools.conditions(managed.symbol);
