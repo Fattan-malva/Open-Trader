@@ -54,7 +54,6 @@ export function observeSpread(quote: Quote): void {
   const sampleValue = categorize(quote.symbol) === "fx" ? quote.spread : quote.spreadPct;
   if (!Number.isFinite(sampleValue) || sampleValue <= 0) return;
   if (last && quote.timestamp >= last.at && quote.timestamp - last.at < SAMPLE_INTERVAL_MS) {
-    last.at = quote.timestamp;
     last.value = sampleValue;
   } else {
     series.push({ at: quote.timestamp, value: sampleValue });
