@@ -100,9 +100,8 @@ export class MomentumTracker {
   observe(quote: Quote): void {
     const series = this.samples.get(quote.symbol) ?? [];
     const last = series[series.length - 1];
-    if (last && quote.timestamp - last.t < SAMPLE_INTERVAL_MS) {
+    if (last && quote.timestamp >= last.t && quote.timestamp - last.t < SAMPLE_INTERVAL_MS) {
       last.mid = quote.mid;
-      last.t = quote.timestamp;
       return;
     }
     series.push({ t: quote.timestamp, mid: quote.mid });
