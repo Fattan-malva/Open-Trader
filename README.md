@@ -236,8 +236,9 @@ npm test
 npm run typecheck
 ```
 
-The tests cover the pure trailing math and the screener/entry gates (trend,
-pullback, spread limit, spread-cost cap, confirmation candle, stop distance).
+Current regression tests cover entry-anchored BUY/SELL virtual stops, monotonic
+ratcheting, and executable-side stop-hit logic. Screener/entry gates and live
+broker/account behavior still need additional integration and demo testing.
 
 ## Troubleshooting
 
