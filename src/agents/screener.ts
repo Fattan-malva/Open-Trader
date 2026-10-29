@@ -244,8 +244,8 @@ export function scoreCandidate(input: CandleScoreInput): Candidate | null {
       setupType: "pullback",
       score: trendScore + pullbackScore + neutralRsiScore + spreadScore,
       reasons: [
-        \`pullback \${distanceAtr.toFixed(2)}×ATR from EMA50\`,
-        \`RSI \${screenerRsi.toFixed(0)}\`,
+        `pullback ${distanceAtr.toFixed(2)}×ATR from EMA50`,
+        `RSI ${screenerRsi.toFixed(0)}`,
       ],
     });
   }
@@ -254,9 +254,9 @@ export function scoreCandidate(input: CandleScoreInput): Candidate | null {
       setupType: "breakout",
       score: trendScore + breakoutStructureScore + breakoutMomentumScore + spreadScore,
       reasons: [
-        \`breakout \${lookback}-bar range\`,
-        \`body \${bodyAtr.toFixed(2)}×ATR\`,
-        \`RSI momentum \${screenerRsi.toFixed(0)}\`,
+        `breakout ${lookback}-bar range`,
+        `body ${bodyAtr.toFixed(2)}×ATR`,
+        `RSI momentum ${screenerRsi.toFixed(0)}`,
       ],
     });
   }
@@ -265,13 +265,13 @@ export function scoreCandidate(input: CandleScoreInput): Candidate | null {
   if (!best || best.score < options.minScore) return null;
 
   const reasons = [
-    \`\${options.trendTimeframe} \${direction === "buy" ? "uptrend" : "downtrend"} \${trendAtr.toFixed(2)}×ATR\`,
+    `${options.trendTimeframe} ${direction === "buy" ? "uptrend" : "downtrend"} ${trendAtr.toFixed(2)}×ATR`,
     ...best.reasons,
-    \`spread \${spreadLabel(symbol, quote)}\`,
-    \`ATR \${atrPct.toFixed(3)}%\`,
-    \`cost \${(spreadRatio * 100).toFixed(0)}% trail\`,
+    `spread ${spreadLabel(symbol, quote)}`,
+    `ATR ${atrPct.toFixed(3)}%`,
+    `cost ${(spreadRatio * 100).toFixed(0)}% trail`,
     ...(spread.baseline !== undefined && spread.spikeRatio !== undefined
-      ? [\`spread \${spread.spikeRatio.toFixed(1)}× symbol median\`]
+      ? [`spread ${spread.spikeRatio.toFixed(1)}× symbol median`]
       : []),
   ];
 
