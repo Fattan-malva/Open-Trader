@@ -807,24 +807,46 @@ function lastAgentActivity(
 }
 
 /** Recent log lines for one agent role, shown under its own card. */
+function conciseAgentMessage(entry: AgentActivity): string {
+  const message = entry.message.replace(/\s+/g, " ").trim();
+  if (entry.agent === "trader") {
+    let match = message.match(/net (-?\d+(?:\.\d+)?) USD/i);
+    if (/close|closed|net /i.test(message) && match) return `CLOSE PnL ${Number(match[1]) >= 0 ? "+" : ""}${Number(match[1]).toFixed(2)}`;
+    match = message.match(/profit-lock activated.*?\+?([0-9.]+) USD/i);
+    if (match) return `TS active +${Number(match[1]).toFixed(2)}`;
+    match = message.match(/open ([A-Z0-9._-]+) ([0-9.]+) lot.*?@ ([0-9.]+)/i);
+    if (match) return `OPEN ${match[1]} ${match[2]} lot @ ${match[3]}`;
+    match = message.match(/trail ([0-9.]+)p/i);
+    if (/trail|TS VIRTUAL hit/i.test(message) && match) {
+      const price = message.match(/(?:TS VIRTUAL hit.*?trail|trail(?: advanced)? to|→)\s*([0-9.]+)/i);
+      return price ? `TS adjust → ${price[1]} · ${match[1]}p` : `TS adjust · ${match[1]}p`;
+    }
+    if (/emergency SL tightened/i.test(message)) {
+      const sl = message.match(/sl[: =]+([0-9.]+)/i);
+      return sl ? `SL adjust → ${sl[1]}` : "SL adjusted";
+    }
+    if (/close failed/i.test(message)) return `CLOSE failed: ${message.split(":").slice(1).join(":").trim()}`;
+  }
+  return message;
+}
+
 function agentLogLines(
   agent: AgentStateFile | null | undefined,
   role: AgentRole,
   limit = 4,
 ): string[] {
   const entries = (agent?.activity ?? []).filter((entry) => entry.agent === role);
-  if (entries.length === 0) {
-    return [style.dim("· belum ada log")];
-  }
+  if (entries.length === 0) return [style.dim("· belum ada log")];
   return entries.slice(-limit).map((entry) => {
+    const message = conciseAgentMessage(entry);
     const text =
       entry.tone === "error"
-        ? style.red(entry.message)
+        ? style.red(message)
         : entry.tone === "warn"
-          ? style.yellow(entry.message)
+          ? style.yellow(message)
           : entry.tone === "success"
-            ? style.green(entry.message)
-            : style.dim(entry.message);
+            ? style.green(message)
+            : style.dim(message);
     return `${style.dim(shortClock(entry.at))} ${text}`;
   });
 }
