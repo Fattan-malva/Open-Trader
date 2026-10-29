@@ -451,7 +451,11 @@ export class Screener {
         });
     }
 
-    return entry.candles.length >= minimumCandles ? entry.candles : null;
+    if (entry.candles.length < minimumCandles) return null;
+    // Continue using a cached snapshot while refreshes are rate-limited, but
+    // never keep trading a candle set that has been stale for more than two
+    // timeframe boundaries.
+    return now - entry.boundary <= duration * 2 ? entry.candles : null;
   }
 
   async scan(universe: string[]): Promise<Candidate[]> {
